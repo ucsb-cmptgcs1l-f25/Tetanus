@@ -6,7 +6,8 @@ use rustc_codegen_ssa::back::write::{CodegenContext, ModuleConfig};
 use rustc_session::config::OutputType;
 use std::fs::File;
 use std::io::Write;
-use super::elf_builder::ElfBuilder;
+// use super::elf_builder::ElfBuilder;
+use std::process::Command;
 
 pub fn codegen(
     cgcx: &CodegenContext<TetanusCodegenBackend>,
@@ -21,9 +22,22 @@ pub fn codegen(
         cgcx.invocation_temp.as_deref(),
     );
     
-    let elf = ElfBuilder::new_with_header();
-    let mut file = File::create(path).unwrap();
-    file.write_all(&elf.bytes).unwrap();
+    // let elf = ElfBuilder::new_with_header();
+    eprintln!("{:?}", path);
+    let assem_file_name = path.to_str().unwrap().to_owned() + ".s";
+    let mut file = File::create(&assem_file_name).unwrap();
+    // file.write_all(&elf.bytes).unwrap();
+
+    file.write_all(b"main:\n li	a0,-1\n.LM4:\n ret").unwrap();
+    Command::new("riscv64-unknown-elf-gcc")
+        .arg("-c")
+        .arg(&assem_file_name)
+        .arg("-o")
+        .arg(path.to_str().unwrap())
+        .spawn()
+        .unwrap()
+        .wait()
+        .unwrap();
 
     module.into_compiled_module(
         false,
