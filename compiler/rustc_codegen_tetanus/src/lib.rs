@@ -50,11 +50,15 @@ use rustc_span::Symbol;
 use rustc_codegen_ssa::CompiledModule;
 
 mod back;
+mod codegen;
+mod toolchain;
 
 rustc_fluent_macro::fluent_messages! { "../messages.ftl" }
 
 #[derive(Clone)]
 pub struct TetanusCodegenBackend(());
+
+static CPU_NAME: &str = "riscv";
 
 impl CodegenBackend for TetanusCodegenBackend {
     fn locale_resource(&self) -> &'static str {
@@ -90,7 +94,7 @@ impl CodegenBackend for TetanusCodegenBackend {
         _outputs: &OutputFilenames,
     ) -> (CodegenResults, FxIndexMap<WorkProductId, WorkProduct>) {
         let (codegen_results, work_products) = ongoing_codegen
-            .downcast::<rustc_codegen_ssa::back::write::OngoingCodegen<TetanusCodegenBackend>>()
+            .downcast::<codegen::aot::OngoingCodegen>()
             .expect("Expected Tetanus's OngoingCodegen, found Box<Any>")
             .join(sess);
         (codegen_results, work_products)
@@ -98,11 +102,14 @@ impl CodegenBackend for TetanusCodegenBackend {
 
     
     fn codegen_crate<'tcx>(&self, tcx: TyCtxt<'tcx>) -> Box<dyn Any> {
-        Box::new(rustc_codegen_ssa::base::codegen_crate(
-            TetanusCodegenBackend(()),
+        codegen::aot::run_aot(
             tcx,
-            "riscv".to_string(),
-        ))
+        )
+        // Box::new(rustc_codegen_ssa::base::codegen_crate(
+        //     TetanusCodegenBackend(()),
+        //     tcx,
+        //     CPU_NAME,
+        // ))
     }
 }
 

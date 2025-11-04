@@ -22,13 +22,11 @@ pub fn codegen(
         cgcx.invocation_temp.as_deref(),
     );
     
-    // let elf = ElfBuilder::new_with_header();
     eprintln!("{:?}", path);
     let assem_file_name = path.to_str().unwrap().to_owned() + ".s";
     let mut file = File::create(&assem_file_name).unwrap();
-    // file.write_all(&elf.bytes).unwrap();
 
-    file.write_all(b"main:\n li	a0,-1\n.LM4:\n ret").unwrap();
+    file.write_all(b"main:\n li	a0,-1\n.LM4:\n ret\n").unwrap();
     Command::new("riscv64-unknown-elf-gcc")
         .arg("-c")
         .arg(&assem_file_name)

@@ -5,6 +5,25 @@ use rustc_codegen_ssa::CrateInfo;
 use rustc_codegen_ssa::CodegenResults;
 use rustc_data_structures::fx::FxIndexMap;
 use rustc_session::Session;
+use rustc_middle::ty::TyCtxt;
+use rustc_codegen_ssa::assert_module_sources::CguReuse;
+use rustc_data_structures::sync::IntoDynSyncSend;
+use rustc_data_structures::sync::par_map;
+use rustc_codegen_ssa::base::determine_cgu_reuse;
+use std::thread::JoinHandle;
+use std::path::PathBuf;
+use rustc_session::config::OutputFilenames;
+use rustc_middle::ty::Instance;
+use rustc_middle::mir::mono::MonoItem;
+use rustc_codegen_ssa::ModuleKind;
+use rustc_data_structures::stable_hasher::{StableHasher, HashStable};
+// use rustc_session::config::OutputType;
+use rustc_span::sym::module;
+
+// use std::fs::File;
+
+use crate::CPU_NAME;
+use std::sync::Arc;
 
 #[allow(dead_code)]
 pub(crate) struct ModuleCodegenResult {
@@ -16,7 +35,7 @@ pub(crate) struct ModuleCodegenResult {
 #[allow(dead_code)]
 pub(crate) enum OngoingModuleCodegen {
     Sync(Result<ModuleCodegenResult, String>),
-    // Async(JoinHandle<Result<ModuleCodegenResult, String>>),
+    Async(JoinHandle<Result<ModuleCodegenResult, String>>),
 }
 
 #[allow(dead_code)]
@@ -41,4 +60,169 @@ impl OngoingCodegen {
             FxIndexMap::default(),
         )
     }
+}
+
+impl<HCX> HashStable<HCX> for OngoingModuleCodegen {
+    fn hash_stable(&self, _: &mut HCX, _: &mut StableHasher) {
+        // do nothing
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct GlobalAsmConfig {
+    _assembler: PathBuf,
+    _target: String,
+    pub(crate) _output_filenames: Arc<OutputFilenames>,
+}
+
+impl GlobalAsmConfig {
+    pub(crate) fn new(tcx: TyCtxt<'_>) -> Self {
+        GlobalAsmConfig {
+            _assembler: crate::toolchain::get_toolchain_binary(tcx.sess, "as"),
+            _target: "riscv64gc-unknown-linux-gnu".to_string(),
+            _output_filenames: tcx.output_filenames(()).clone(),
+        }
+    }
+}
+
+/// Create and start generation for cgus
+/// this is stolen from cranelift
+pub(crate) fn run_aot(tcx: TyCtxt<'_>) -> Box<OngoingCodegen> {
+    let target_cpu = CPU_NAME.to_string();
+
+    let cgus = if tcx.sess.opts.output_types.should_codegen() {
+        tcx.collect_and_partition_mono_items(()).codegen_units
+    } else {
+        // If only `--emit metadata` is used, we shouldn't perform any codegen.
+        // Also `tcx.collect_and_partition_mono_items` may panic in that case.
+        return Box::new(OngoingCodegen {
+            modules: vec![],
+            allocator_module: None,
+            crate_info: CrateInfo::new(tcx, target_cpu),
+            // concurrency_limiter: ConcurrencyLimiter::new(0),
+        });
+    };
+
+    if tcx.dep_graph.is_fully_enabled() {
+        for cgu in cgus {
+            tcx.ensure_ok().codegen_unit(cgu.name());
+        }
+    }
+
+    // Calculate the CGU reuse
+    let cgu_reuse = tcx.sess.time("find_cgu_reuse", || {
+        cgus.iter().map(|cgu| determine_cgu_reuse(tcx, &cgu)).collect::<Vec<_>>()
+    });
+
+    rustc_codegen_ssa::assert_module_sources::assert_module_sources(tcx, &|cgu_reuse_tracker| {
+        for (i, cgu) in cgus.iter().enumerate() {
+            let cgu_reuse = cgu_reuse[i];
+            cgu_reuse_tracker.set_actual_reuse(cgu.name().as_str(), cgu_reuse);
+        }
+    });
+
+    let global_asm_config = Arc::new(GlobalAsmConfig::new(tcx));
+
+    // let disable_incr_cache = disable_incr_cache();
+    let (todo_cgus, done_cgus) =
+        cgus.into_iter().enumerate().partition::<Vec<_>, _>(|&(i, _)| match cgu_reuse[i] {
+            // _ if disable_incr_cache => true,
+            CguReuse::No => true,
+            CguReuse::PreLto | CguReuse::PostLto => false,
+        });
+
+    // let concurrency_limiter = IntoDynSyncSend(ConcurrencyLimiter::new(todo_cgus.len()));
+
+    let modules: Vec<OngoingModuleCodegen> =
+        tcx.sess.time("codegen mono items", || {
+            let modules: Vec<IntoDynSyncSend<OngoingModuleCodegen>> = par_map(todo_cgus, |(_, cgu)| {
+                let dep_node = cgu.codegen_dep_node(tcx);
+                let (m, _): (OngoingModuleCodegen, _) = tcx.dep_graph.with_task(
+                    dep_node,
+                    tcx,
+                    (global_asm_config.clone(), cgu.name()), //, concurrency_limiter.acquire(tcx.dcx())),
+                    start_module_codegen,
+                    Some(rustc_middle::dep_graph::hash_result),
+                );
+                IntoDynSyncSend(m)
+            });
+            // let modules: Vec<OngoingModuleCodegen> = vec![];
+            modules
+                .into_iter()
+                .map(|module: IntoDynSyncSend<OngoingModuleCodegen>| module.0)
+                .chain(done_cgus.into_iter().map(|(_, _cgu)| {
+                    // OngoingModuleCodegen::Sync(reuse_workproduct_for_cgu(tcx, cgu))
+                    OngoingModuleCodegen::Sync(Err("Unimpl".to_string()))
+                }))
+                .collect()
+        });
+
+    // let allocator_module = emit_allocator_module(tcx);
+
+    Box::new(OngoingCodegen {
+        modules,
+        allocator_module: None, // allocator_module,
+        crate_info: CrateInfo::new(tcx, target_cpu),
+        // concurrency_limiter: concurrency_limiter.0,
+    })
+}
+
+/// Generated assembly for a cgu
+fn start_module_codegen(
+    tcx: TyCtxt<'_>,
+    (_global_asm_config, cgu_name): (
+        Arc<GlobalAsmConfig>,
+        rustc_span::Symbol,
+        // ConcurrencyLimiterToken,
+    ),
+) -> OngoingModuleCodegen {
+    eprintln!("running module codegen for {}", cgu_name);
+    let cgu = tcx.codegen_unit(cgu_name);
+    let mono_items = cgu.items_in_deterministic_order(tcx);
+    eprintln!("mono items len {}", mono_items.len());
+    let mut asm = String::new();
+    for (i, item) in mono_items.into_iter().enumerate() {
+        asm += match item {
+            (MonoItem::Fn(inst), _) => codegen_function(tcx.symbol_name(inst).name, inst),
+            _ => { eprintln!("mono item {}: {:?}", i, item); String::new() },
+        }.as_str();
+    }
+
+    // let path = cgcx.output_filenames.temp_path_for_cgu(
+    //     OutputType::Object,
+    //     &module.name,
+    //     cgcx.invocation_temp.as_deref(),
+    // );
+    // let assem_file_name = path.to_str().unwrap().to_owned() + ".s";
+    // let mut file = File::create(&assem_file_name).unwrap();
+    // file.write_all(asm).unwrap();
+
+    OngoingModuleCodegen::Sync(Ok(ModuleCodegenResult{
+        module_regular: CompiledModule {
+            name: format!("{cgu_name}.asm"),
+            kind: ModuleKind::Regular,
+            object: None,
+            dwarf_object: None,
+            bytecode: None,
+            assembly: None,// assem_file_name,
+            llvm_ir: None,
+            links_from_incr_cache: Vec::new(),
+        },
+        module_global_asm: None,
+        existing_work_product: None,
+    }))
+}
+
+fn codegen_function<'tcx>(
+    symbol_name: &str,
+    // module: &mut dyn Module,
+    inst: Instance<'tcx>,
+) -> String {
+    eprintln!("name: {}", symbol_name);
+    let mut asm = String::new();
+    asm += &(".".to_owned() + symbol_name);
+    asm += ";";
+    asm += format!("{:?}", inst).as_str();
+
+    return asm;
 }
