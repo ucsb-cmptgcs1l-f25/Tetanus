@@ -3,6 +3,7 @@ use rustc_middle::ty::{Instance, InstanceKind};
 use rustc_middle::ty::GenericArgsRef;
 use rustc_span::def_id;
 
+#[test]
 pub fn test_empty_fn() {
     assert_eq!(
         aot::codegen_function(
@@ -13,5 +14,7 @@ pub fn test_empty_fn() {
             }
         ),
         ".test\n",
-    )
+    );
+
+    assert_true!(false);
 }

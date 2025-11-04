@@ -1,4 +1,3 @@
-// use rustc_codegen_ssa::ModuleCodegen;
 use rustc_codegen_ssa::CompiledModule;
 use rustc_middle::dep_graph::{WorkProduct, WorkProductId};
 use rustc_codegen_ssa::CrateInfo;
@@ -13,9 +12,11 @@ use rustc_middle::ty::Instance;
 use rustc_middle::mir::mono::MonoItem;
 use rustc_codegen_ssa::ModuleKind;
 use rustc_data_structures::stable_hasher::{StableHasher, HashStable};
-// use rustc_session::config::OutputType;
+use rustc_session::config::OutputType;
+// use rustc_span::sym::module;
 
-// use std::fs::File;
+use std::fs::File;
+use std::io::Write;
 
 use crate::CPU_NAME;
 use std::sync::Arc;
@@ -140,20 +141,20 @@ fn start_module_codegen(
         }.as_str();
     }
 
-    // let path = cgcx.output_filenames.temp_path_for_cgu(
-    //     OutputType::Object,
-    //     &module.name,
-    //     cgcx.invocation_temp.as_deref(),
-    // );
-    // let assem_file_name = path.to_str().unwrap().to_owned() + ".s";
-    // let mut file = File::create(&assem_file_name).unwrap();
-    // file.write_all(asm).unwrap();
+    let path = tcx.output_filenames(()).temp_path_for_cgu(
+        OutputType::Object,
+        cgu.name().to_string().as_str(),
+        tcx.sess.invocation_temp.as_deref(),
+    );
+    let assem_file_name = path.to_str().unwrap().to_owned() + ".s";
+    let mut file = File::create(&assem_file_name).unwrap();
+    file.write_all(asm.as_bytes()).unwrap();
 
     OngoingModuleCodegen::Sync(Ok(ModuleCodegenResult{
         module_regular: CompiledModule {
             name: format!("{cgu_name}.asm"),
             kind: ModuleKind::Regular,
-            object: None,
+            object: Some(path),
             dwarf_object: None,
             bytecode: None,
             assembly: None,// assem_file_name,
@@ -173,8 +174,9 @@ fn codegen_function<'tcx>(
     eprintln!("name: {}", symbol_name);
     let mut asm = String::new();
     asm += &(".".to_owned() + symbol_name);
-    asm += ";";
+    asm += "\n;";
     asm += format!("{:?}", inst).as_str();
 
+    asm += "\n";
     return asm;
 }
