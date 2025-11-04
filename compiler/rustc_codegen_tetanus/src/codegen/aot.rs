@@ -6,10 +6,6 @@ use rustc_codegen_ssa::CodegenResults;
 use rustc_data_structures::fx::FxIndexMap;
 use rustc_session::Session;
 use rustc_middle::ty::TyCtxt;
-use rustc_codegen_ssa::assert_module_sources::CguReuse;
-use rustc_data_structures::sync::IntoDynSyncSend;
-use rustc_data_structures::sync::par_map;
-use rustc_codegen_ssa::base::determine_cgu_reuse;
 use std::thread::JoinHandle;
 use std::path::PathBuf;
 use rustc_session::config::OutputFilenames;
@@ -18,7 +14,6 @@ use rustc_middle::mir::mono::MonoItem;
 use rustc_codegen_ssa::ModuleKind;
 use rustc_data_structures::stable_hasher::{StableHasher, HashStable};
 // use rustc_session::config::OutputType;
-use rustc_span::sym::module;
 
 // use std::fs::File;
 
@@ -109,55 +104,12 @@ pub(crate) fn run_aot(tcx: TyCtxt<'_>) -> Box<OngoingCodegen> {
         }
     }
 
-    // Calculate the CGU reuse
-    let cgu_reuse = tcx.sess.time("find_cgu_reuse", || {
-        cgus.iter().map(|cgu| determine_cgu_reuse(tcx, &cgu)).collect::<Vec<_>>()
-    });
-
-    rustc_codegen_ssa::assert_module_sources::assert_module_sources(tcx, &|cgu_reuse_tracker| {
-        for (i, cgu) in cgus.iter().enumerate() {
-            let cgu_reuse = cgu_reuse[i];
-            cgu_reuse_tracker.set_actual_reuse(cgu.name().as_str(), cgu_reuse);
-        }
-    });
-
     let global_asm_config = Arc::new(GlobalAsmConfig::new(tcx));
 
-    // let disable_incr_cache = disable_incr_cache();
-    let (todo_cgus, done_cgus) =
-        cgus.into_iter().enumerate().partition::<Vec<_>, _>(|&(i, _)| match cgu_reuse[i] {
-            // _ if disable_incr_cache => true,
-            CguReuse::No => true,
-            CguReuse::PreLto | CguReuse::PostLto => false,
-        });
-
-    // let concurrency_limiter = IntoDynSyncSend(ConcurrencyLimiter::new(todo_cgus.len()));
-
-    let modules: Vec<OngoingModuleCodegen> =
-        tcx.sess.time("codegen mono items", || {
-            let modules: Vec<IntoDynSyncSend<OngoingModuleCodegen>> = par_map(todo_cgus, |(_, cgu)| {
-                let dep_node = cgu.codegen_dep_node(tcx);
-                let (m, _): (OngoingModuleCodegen, _) = tcx.dep_graph.with_task(
-                    dep_node,
-                    tcx,
-                    (global_asm_config.clone(), cgu.name()), //, concurrency_limiter.acquire(tcx.dcx())),
-                    start_module_codegen,
-                    Some(rustc_middle::dep_graph::hash_result),
-                );
-                IntoDynSyncSend(m)
-            });
-            // let modules: Vec<OngoingModuleCodegen> = vec![];
-            modules
-                .into_iter()
-                .map(|module: IntoDynSyncSend<OngoingModuleCodegen>| module.0)
-                .chain(done_cgus.into_iter().map(|(_, _cgu)| {
-                    // OngoingModuleCodegen::Sync(reuse_workproduct_for_cgu(tcx, cgu))
-                    OngoingModuleCodegen::Sync(Err("Unimpl".to_string()))
-                }))
-                .collect()
-        });
-
-    // let allocator_module = emit_allocator_module(tcx);
+    let mut modules = vec![];
+    for cgu in cgus {
+        modules.push(start_module_codegen(tcx, (global_asm_config.clone(), cgu.name())))
+    }
 
     Box::new(OngoingCodegen {
         modules,
