@@ -5,6 +5,7 @@ use rustc_span::def_id;
 
 #[test]
 pub fn test_empty_fn() {
+    eprintln!("testing empty fn");
     assert_eq!(
         aot::codegen_function(
             "test",

@@ -1061,6 +1061,7 @@ impl<'a> Builder<'a> {
                 test::Pretty,
                 test::CodegenCranelift,
                 test::CodegenGCC,
+                test::CodegenTetanus,
                 test::Crate,
                 test::CrateLibrustc,
                 test::CrateRustdoc,

@@ -3625,6 +3625,129 @@ impl Step for CodegenGCC {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CodegenTetanus {
+    compiler: Compiler,
+    target: TargetSelection,
+}
+
+impl Step for CodegenTetanus {
+    type Output = ();
+    const DEFAULT: bool = true;
+    const ONLY_HOSTS: bool = true;
+
+    fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
+        run.paths(&["compiler/rustc_codegen_tetanus"])
+    }
+
+    fn make_run(run: RunConfig<'_>) {
+        let builder = run.builder;
+        let host = run.build_triple();
+        let compiler = run.builder.compiler_for(run.builder.top_stage, host, host);
+
+        if builder.doc_tests == DocTests::Only {
+            return;
+        }
+
+        if builder.download_rustc() {
+            builder.info("CI rustc uses the default codegen backend. skipping");
+            return;
+        }
+
+        let triple = run.target.triple;
+        let target_supported = triple.contains("riscv64gc");
+        if !target_supported {
+            builder.info("target not supported by rustc_codegen_tetanus. skipping");
+            return;
+        }
+
+        if builder.remote_tested(run.target) {
+            builder.info("remote testing is not supported by rustc_codegen_tetanus. skipping");
+            return;
+        }
+
+        if !builder.config.codegen_backends(run.target).contains(&CodegenBackendKind::Tetanus) {
+            builder.info("tetanus not in rust.codegen-backends. skipping");
+            return;
+        }
+
+        builder.ensure(CodegenTetanus { compiler, target: run.target });
+    }
+
+    fn run(self, builder: &Builder<'_>) {
+        let compiler = self.compiler;
+        let target = self.target;
+
+        builder.ensure(
+            compile::Std::new(compiler, target)
+                .extra_rust_args(&["-Csymbol-mangling-version=v0", "-Cpanic=abort"]),
+        );
+
+        // If we're not doing a full bootstrap but we're testing a stage2
+        // version of libstd, then what we're actually testing is the libstd
+        // produced in stage1. Reflect that here by updating the compiler that
+        // we're working with automatically.
+        let compiler = builder.compiler_for(compiler.stage, compiler.host, target);
+
+        let build_cargo = || {
+            let mut cargo = builder::Cargo::new(
+                builder,
+                compiler,
+                Mode::Codegen, // Must be codegen to ensure dlopen on compiled dylibs works
+                SourceType::InTree,
+                target,
+                Kind::Run,
+            );
+
+            cargo.current_dir(&builder.src.join("compiler/rustc_codegen_tetanus"));
+            // cargo
+            //     .arg("--manifest-path")
+            //     .arg(builder.src.join("compiler/rustc_codegen_gcc/build_system/Cargo.toml"));
+            compile::rustc_cargo_env(builder, &mut cargo, target);
+
+            // Avoid incremental cache issues when changing rustc
+            cargo.env("CARGO_BUILD_INCREMENTAL", "false");
+            cargo.rustflag("-Cpanic=abort");
+
+            cargo
+        };
+
+        builder.info(&format!(
+            "{} Tetanus stage{} ({} -> {})",
+            Kind::Test.description(),
+            compiler.stage,
+            &compiler.host,
+            target
+        ));
+        let _time = helpers::timeit(builder);
+
+        // FIXME: Uncomment the `prepare` command below once vendoring is implemented.
+        /*
+        let mut prepare_cargo = build_cargo();
+        prepare_cargo.arg("--").arg("prepare");
+        #[expect(deprecated)]
+        builder.config.try_run(&mut prepare_cargo.into()).unwrap();
+        */
+
+        let mut cargo = build_cargo();
+
+        cargo
+            // cg_gcc's build system ignores RUSTFLAGS. pass some flags through CG_RUSTFLAGS instead.
+            .env("CG_RUSTFLAGS", "-Alinker-messages")
+            .arg("--")
+            .arg("test")
+            .arg("--use-backend")
+            .arg("tetanus")
+            .arg("--out-dir")
+            .arg(builder.stage_out(compiler, Mode::ToolRustc).join("cg_tetanus"))
+            .arg("--release")
+            .arg("--mini-tests")
+            .arg("--std-tests");
+        cargo.args(builder.config.test_args());
+
+        cargo.into_cmd().run(builder);
+    }
+}
 /// Test step that does two things:
 /// - Runs `cargo test` for the `src/tools/test-float-parse` tool.
 /// - Invokes the `test-float-parse` tool to test the standard library's
