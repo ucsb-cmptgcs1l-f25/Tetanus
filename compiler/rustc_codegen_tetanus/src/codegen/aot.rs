@@ -13,6 +13,7 @@ use rustc_middle::mir::mono::MonoItem;
 use rustc_codegen_ssa::ModuleKind;
 use rustc_data_structures::stable_hasher::{StableHasher, HashStable};
 use rustc_session::config::OutputType;
+use rustc_hir::Mutability;
 // use rustc_span::sym::module;
 
 use std::fs::File;
@@ -136,7 +137,7 @@ fn start_module_codegen(
     let mut asm = String::new();
     for (i, item) in mono_items.into_iter().enumerate() {
         asm += match item {
-            (MonoItem::Fn(inst), _) => codegen_function(tcx.symbol_name(inst).name, inst),
+            (MonoItem::Fn(inst), _) => codegen_function(tcx, tcx.symbol_name(inst).name, inst),
             _ => { eprintln!("mono item {}: {:?}", i, item); String::new() },
         }.as_str();
     }
@@ -167,16 +168,46 @@ fn start_module_codegen(
 }
 
 fn codegen_function<'tcx>(
+    tcx: TyCtxt<'tcx>,
     symbol_name: &str,
     // module: &mut dyn Module,
     inst: Instance<'tcx>,
 ) -> String {
     eprintln!("name: {}", symbol_name);
+    let mir = tcx.instance_mir(inst.def);
+
+    // eprintln!("mir: {:?}", mir);
+
     let mut asm = String::new();
     asm += &(".".to_owned() + symbol_name);
-    asm += "\n;";
-    asm += format!("{:?}", inst).as_str();
-
     asm += "\n";
+    // calling convention
+    // we save everything on the stack rn bc i dont wanna get too fancy
+    const STACK_OFFSET: isize = -32;
+    asm += format!("\taddi\tsp, sp, {STACK_OFFSET}\n").as_str();
+    // TODO save save registers
+    // (declartion, type size in words)
+    let mut locals = vec![];
+    for decl in &mir.local_decls {
+        // eprintln!("{:?}\n", decl);
+        locals.push((decl, 1));
+    }
+
+    for (i, reg) in locals.into_iter().enumerate() {
+        // TODO use stack when temporaries run out
+        asm += format!("\txori\tr{0}, r{0}, r{0} ", i).as_str();
+        asm += "; let";
+        if reg.0.mutability == Mutability::Mut { asm += " mut"; }
+        asm += format!(" {:?}", reg.0.ty).as_str();
+        asm += "\n";
+    }
+
+    for bb in &*mir.basic_blocks {
+        eprintln!("{:?}", bb.statements);
+        eprintln!("{:?}", bb.terminator);
+    }
+
+    asm += format!("\taddi\tsp, sp, {}", -STACK_OFFSET).as_str();
+    asm += "\nret\n";
     return asm;
 }
