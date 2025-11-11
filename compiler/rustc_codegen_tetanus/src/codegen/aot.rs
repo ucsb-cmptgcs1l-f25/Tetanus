@@ -15,6 +15,7 @@ use rustc_codegen_ssa::ModuleKind;
 use rustc_data_structures::stable_hasher::{StableHasher, HashStable};
 use rustc_session::config::OutputType;
 use rustc_hir::Mutability;
+use rustc_middle::ty::{TyKind};
 // use rustc_span::sym::module;
 
 use std::fs::File;
@@ -190,7 +191,7 @@ fn codegen_function<'tcx>(
     let mut locals = vec![];
     for decl in &mir.local_decls {
         // eprintln!("{:?}\n", decl);
-        locals.push((decl, 8));
+        locals.push((decl, local_size(decl.ty.kind(), tcx).unwrap_or(1) as isize));
     }
 
     for (_i, local) in locals.into_iter().enumerate() {
@@ -226,4 +227,50 @@ fn codegen_function<'tcx>(
     asm += format!("\taddi\tsp, sp, {}", -stack_offset).as_str();
     asm += "\nret\n\n";
     return asm;
+}
+
+fn local_size<'tcx>(ty: &TyKind<'tcx>, tcx: TyCtxt<'tcx>) -> Result<usize, String> {
+    match ty {
+        TyKind::Bool | TyKind::Char => Ok(1),
+        TyKind::Int(ity) => Ok(ity.bit_width().unwrap_or(64) as usize / 8),
+        TyKind::Uint(uity) => Ok(uity.bit_width().unwrap_or(64) as usize / 8),
+        TyKind::Float(fty) => Ok(fty.bit_width() as usize / 8),
+        // ptrs
+        TyKind::RawPtr(..) => Ok(8), // TODO do we handle rv32
+        TyKind::Ref(..) => Ok(8),
+        TyKind::FnPtr(..) => Ok(8), // is this right
+        // collectiony things
+        TyKind::Array(t, n) => local_size(t.kind(), tcx).map(|s| s * n.try_to_target_usize(tcx).unwrap() as usize),
+        // TyKind::Tuple(tys) => tys.iter().map(|t| local_size(t.kind(), tcx)).sum(),
+
+        _ => Err(format!("unknown type: {:?}", ty)),
+    }
+}
+
+#[test]
+pub fn test_type_sizes() {
+    assert_equal!(
+        aot::local_size(TyKind::Bool),
+        Ok(1)
+    );
+
+    assert_equal!(
+        aot::local_size(TyKind::Char),
+        Ok(1)
+    );
+
+    assert_equal!(
+        aot::local_size(TyKind::Int(IntTy::I32)),
+        Ok(4)
+    );
+
+    assert_equal!(
+        aot::local_size(TyKind::Uint(UintTy::U32)),
+        Ok(4)
+    );
+
+    assert_equal!(
+        aot::local_size(TyKind::Float(FloatTy::F32)),
+        Ok(4)
+    );
 }

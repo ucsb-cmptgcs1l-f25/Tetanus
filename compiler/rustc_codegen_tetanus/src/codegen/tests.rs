@@ -1,4 +1,4 @@
-use aot;
+use crate::codegen::aot;
 use rustc_middle::ty::{Instance, InstanceKind};
 use rustc_middle::ty::GenericArgsRef;
 use rustc_span::def_id;
