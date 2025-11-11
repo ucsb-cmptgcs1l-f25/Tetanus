@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use rustc_session::config::OutputFilenames;
 use rustc_middle::ty::Instance;
 use rustc_middle::mir::mono::MonoItem;
+use rustc_middle::mir::{TerminatorKind, StatementKind};
 use rustc_codegen_ssa::ModuleKind;
 use rustc_data_structures::stable_hasher::{StableHasher, HashStable};
 use rustc_session::config::OutputType;
@@ -173,41 +174,56 @@ fn codegen_function<'tcx>(
     // module: &mut dyn Module,
     inst: Instance<'tcx>,
 ) -> String {
-    eprintln!("name: {}", symbol_name);
+    // eprintln!("name: {}", symbol_name);
     let mir = tcx.instance_mir(inst.def);
 
     // eprintln!("mir: {:?}", mir);
 
     let mut asm = String::new();
-    asm += &(".".to_owned() + symbol_name);
-    asm += "\n";
+    asm += symbol_name;
+    asm += ":\n";
     // calling convention
     // we save everything on the stack rn bc i dont wanna get too fancy
-    const STACK_OFFSET: isize = -32;
-    asm += format!("\taddi\tsp, sp, {STACK_OFFSET}\n").as_str();
+    let mut stack_offset: isize = 0;
     // TODO save save registers
-    // (declartion, type size in words)
+    // (declartion, type size in bytes)
     let mut locals = vec![];
     for decl in &mir.local_decls {
         // eprintln!("{:?}\n", decl);
-        locals.push((decl, 1));
+        locals.push((decl, 8));
     }
 
-    for (i, reg) in locals.into_iter().enumerate() {
-        // TODO use stack when temporaries run out
-        asm += format!("\txori\tr{0}, r{0}, r{0} ", i).as_str();
+    for (_i, local) in locals.into_iter().enumerate() {
+        // Push 0 onto stack
+        asm += format!("\tsd\tzero, {}(sp) ", -local.1).as_str();
         asm += "; let";
-        if reg.0.mutability == Mutability::Mut { asm += " mut"; }
-        asm += format!(" {:?}", reg.0.ty).as_str();
+        if local.0.mutability == Mutability::Mut { asm += " mut"; }
+        asm += format!(" {:?}", local.0.ty).as_str();
         asm += "\n";
+        // Update stack pointer
+        stack_offset -= local.1;
+        asm += format!("\taddi\tsp, sp, -{}\n", local.1).as_str();
     }
 
-    for bb in &*mir.basic_blocks {
-        eprintln!("{:?}", bb.statements);
-        eprintln!("{:?}", bb.terminator);
+    for (id, bb) in (*mir.basic_blocks).into_iter().enumerate() {
+        asm += format!("{:?}:\n", id).as_str();
+        // generate statements
+        for statement in &bb.statements {
+            match statement.kind {
+                StatementKind::StorageLive(_) | StatementKind::StorageDead(_) => {},
+                _ => asm += format!("\t; TODO: {:?}\n", statement.kind).as_str(),
+            }
+        }
+        // generate terminator
+        match bb.terminator().kind {
+            TerminatorKind::Goto{ target } => asm += format!("\tj {:?}\n", target).as_str(),
+            TerminatorKind::Return => asm += "\tj end\n",
+            _ => asm += format!("\t; TODO: {:?}\n\n", bb.terminator().kind).as_str(),
+        }
     }
 
-    asm += format!("\taddi\tsp, sp, {}", -STACK_OFFSET).as_str();
-    asm += "\nret\n";
+    asm += "end:\n";
+    asm += format!("\taddi\tsp, sp, {}", -stack_offset).as_str();
+    asm += "\nret\n\n";
     return asm;
 }
