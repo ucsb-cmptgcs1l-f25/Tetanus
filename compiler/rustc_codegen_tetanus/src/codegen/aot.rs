@@ -1,28 +1,32 @@
-use rustc_codegen_ssa::CompiledModule;
-use rustc_middle::dep_graph::{WorkProduct, WorkProductId};
-use rustc_codegen_ssa::CrateInfo;
-use rustc_codegen_ssa::CodegenResults;
-use rustc_data_structures::fx::FxIndexMap;
-use rustc_session::Session;
-use rustc_middle::ty::TyCtxt;
-use std::thread::JoinHandle;
-use std::path::PathBuf;
-use rustc_session::config::OutputFilenames;
-use rustc_middle::ty::Instance;
-use rustc_middle::mir::mono::MonoItem;
-use rustc_middle::mir::{TerminatorKind, StatementKind};
-use rustc_codegen_ssa::ModuleKind;
-use rustc_data_structures::stable_hasher::{StableHasher, HashStable};
-use rustc_session::config::OutputType;
-use rustc_hir::Mutability;
-use rustc_middle::ty::{TyKind};
-// use rustc_span::sym::module;
-
 use std::fs::File;
 use std::io::Write;
-
-use crate::CPU_NAME;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::thread::JoinHandle;
+
+use rustc_codegen_ssa::{CodegenResults, CompiledModule, CrateInfo, ModuleKind};
+use rustc_data_structures::fx::FxIndexMap;
+use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
+use rustc_hir::Mutability;
+use rustc_middle::dep_graph::{WorkProduct, WorkProductId};
+use rustc_middle::mir::mono::MonoItem;
+use rustc_middle::mir::{StatementKind, TerminatorKind};
+use rustc_middle::ty::{
+    AdtDef,
+    EarlyBinder,
+    // ConstKind,
+    GenericArgs,
+    Instance,
+    TyCtxt,
+    TyKind,
+    TypeFoldable,
+    TypingEnv,
+};
+use rustc_session::Session;
+use rustc_session::config::{OutputFilenames, OutputType};
+
+// use rustc_span::DUMMY_SP;
+use crate::CPU_NAME;
 
 #[allow(dead_code)]
 pub(crate) struct ModuleCodegenResult {
@@ -51,11 +55,7 @@ impl OngoingCodegen {
         // outputs: &OutputFilenames,
     ) -> (CodegenResults, FxIndexMap<WorkProductId, WorkProduct>) {
         (
-            CodegenResults {
-                modules: vec![],
-                allocator_module: None,
-                crate_info: self.crate_info,
-            },
+            CodegenResults { modules: vec![], allocator_module: None, crate_info: self.crate_info },
             FxIndexMap::default(),
         )
     }
@@ -136,12 +136,17 @@ fn start_module_codegen(
     let cgu = tcx.codegen_unit(cgu_name);
     let mono_items = cgu.items_in_deterministic_order(tcx);
     eprintln!("mono items len {}", mono_items.len());
+
     let mut asm = String::new();
     for (i, item) in mono_items.into_iter().enumerate() {
         asm += match item {
             (MonoItem::Fn(inst), _) => codegen_function(tcx, tcx.symbol_name(inst).name, inst),
-            _ => { eprintln!("mono item {}: {:?}", i, item); String::new() },
-        }.as_str();
+            _ => {
+                eprintln!("mono item {}: {:?}", i, item);
+                String::new()
+            }
+        }
+        .as_str();
     }
 
     let path = tcx.output_filenames(()).temp_path_for_cgu(
@@ -153,20 +158,31 @@ fn start_module_codegen(
     let mut file = File::create(&assem_file_name).unwrap();
     file.write_all(asm.as_bytes()).unwrap();
 
-    OngoingModuleCodegen::Sync(Ok(ModuleCodegenResult{
+    OngoingModuleCodegen::Sync(Ok(ModuleCodegenResult {
         module_regular: CompiledModule {
             name: format!("{cgu_name}.asm"),
             kind: ModuleKind::Regular,
             object: Some(path),
             dwarf_object: None,
             bytecode: None,
-            assembly: None,// assem_file_name,
+            assembly: None, // assem_file_name,
             llvm_ir: None,
             links_from_incr_cache: Vec::new(),
         },
         module_global_asm: None,
         existing_work_product: None,
     }))
+}
+
+pub fn monomorphize<'tcx, T>(tcx: TyCtxt<'tcx>, inst: Instance<'tcx>, value: T) -> T
+where
+    T: Copy + TypeFoldable<TyCtxt<'tcx>>,
+{
+    inst.instantiate_mir_and_normalize_erasing_regions(
+        tcx,
+        TypingEnv::fully_monomorphized(),
+        EarlyBinder::bind(value),
+    )
 }
 
 fn codegen_function<'tcx>(
@@ -185,25 +201,48 @@ fn codegen_function<'tcx>(
     asm += ":\n";
     // calling convention
     // we save everything on the stack rn bc i dont wanna get too fancy
+
     let mut stack_offset: isize = 0;
-    // TODO save save registers
-    // (declartion, type size in bytes)
+    // Save ra and fp
+    asm += format!("\tsd\tra, 8(sp)\n").as_str();
+    asm += format!("\tsd\tfp, 16(sp)\n").as_str();
+    stack_offset += 16;
+    asm += format!("\tmv\tfp, sp\n").as_str();
+    // TODO save saved registers
+
+    // (declartion, type size in bytes, err msg)
     let mut locals = vec![];
     for decl in &mir.local_decls {
         // eprintln!("{:?}\n", decl);
-        locals.push((decl, local_size(decl.ty.kind(), tcx).unwrap_or(1) as isize));
+        let mono_ty = monomorphize(tcx, inst, decl.ty);
+        let size = local_size(mono_ty.kind(), tcx);
+        locals.push((
+            mono_ty,
+            decl,
+            size.clone().unwrap_or(1) as isize,
+            size.err().unwrap_or("".to_owned()),
+        ));
     }
 
     for (_i, local) in locals.into_iter().enumerate() {
         // Push 0 onto stack
-        asm += format!("\tsd\tzero, {}(sp) ", -local.1).as_str();
+        // TODO make this zero the right number of bytes
+        asm += format!("\tsd\tzero, {}(sp) ", -local.2).as_str();
+        // comment what this is for
         asm += "; let";
-        if local.0.mutability == Mutability::Mut { asm += " mut"; }
-        asm += format!(" {:?}", local.0.ty).as_str();
+        if local.1.mutability == Mutability::Mut {
+            asm += " mut";
+        }
+        asm += format!(" {:?}", local.0).as_str();
         asm += "\n";
+        if local.3 != "" {
+            asm += "; ";
+            asm += local.3.as_str();
+            asm += "\n";
+        }
         // Update stack pointer
-        stack_offset -= local.1;
-        asm += format!("\taddi\tsp, sp, -{}\n", local.1).as_str();
+        stack_offset -= local.2;
+        asm += format!("\taddi\tsp, sp, -{}\n", local.2).as_str();
     }
 
     for (id, bb) in (*mir.basic_blocks).into_iter().enumerate() {
@@ -211,13 +250,13 @@ fn codegen_function<'tcx>(
         // generate statements
         for statement in &bb.statements {
             match statement.kind {
-                StatementKind::StorageLive(_) | StatementKind::StorageDead(_) => {},
+                StatementKind::StorageLive(_) | StatementKind::StorageDead(_) => {}
                 _ => asm += format!("\t; TODO: {:?}\n", statement.kind).as_str(),
             }
         }
         // generate terminator
         match bb.terminator().kind {
-            TerminatorKind::Goto{ target } => asm += format!("\tj {:?}\n", target).as_str(),
+            TerminatorKind::Goto { target } => asm += format!("\tj {:?}\n", target).as_str(),
             TerminatorKind::Return => asm += "\tj end\n",
             _ => asm += format!("\t; TODO: {:?}\n\n", bb.terminator().kind).as_str(),
         }
@@ -229,6 +268,7 @@ fn codegen_function<'tcx>(
     return asm;
 }
 
+/// Return the size on the stack of ty in bytes
 fn local_size<'tcx>(ty: &TyKind<'tcx>, tcx: TyCtxt<'tcx>) -> Result<usize, String> {
     match ty {
         TyKind::Bool | TyKind::Char => Ok(1),
@@ -240,37 +280,60 @@ fn local_size<'tcx>(ty: &TyKind<'tcx>, tcx: TyCtxt<'tcx>) -> Result<usize, Strin
         TyKind::Ref(..) => Ok(8),
         TyKind::FnPtr(..) => Ok(8), // is this right
         // collectiony things
-        TyKind::Array(t, n) => local_size(t.kind(), tcx).map(|s| s * n.try_to_target_usize(tcx).unwrap() as usize),
-        // TyKind::Tuple(tys) => tys.iter().map(|t| local_size(t.kind(), tcx)).sum(),
+        // TyKind::Array(t, n) => local_size(t.kind(), tcx).map(|s| {
+        //     if let ConstKind::Unevaluated(c) = n.kind() {
+        //         return tcx.const_eval_resolve(TypingEnv::fully_monomorphized(), c, DUMMY_SP)
+        //             .expect(format!("Array len not resolvable to usize! type {:?}", ty).as_str())
+        //             .try_to_target_usize(tcx)
+        //             .expect(format!("Array len not convertible to usize! type {:?}", ty).as_str())
+        //             as usize * s;
+        //     };
+        //     s * n
+        //         .try_to_target_usize(tcx)
+        //         .expect(format!("Array len not convertible to usize! type {:?}", ty).as_str())
+        //         as usize
+        // }),
+        TyKind::Tuple(tys) => tys.iter().map(|t| local_size(t.kind(), tcx)).sum(),
+        // adts
+        TyKind::Adt(adt, gargs) => adt_size(tcx, *adt, gargs),
+        // zst
+        TyKind::Never => Ok(0),
 
-        _ => Err(format!("unknown type: {:?}", ty)),
+        _ => Err(format!("unknown type: {:?} kind: {:?}", ty, ty)),
     }
 }
 
 #[test]
 pub fn test_type_sizes() {
-    assert_equal!(
-        aot::local_size(TyKind::Bool),
-        Ok(1)
-    );
+    let tcx = (); // TODO fix ??????
+    assert_equal!(aot::local_size(TyKind::Bool), Ok(1));
 
-    assert_equal!(
-        aot::local_size(TyKind::Char),
-        Ok(1)
-    );
+    assert_equal!(aot::local_size(TyKind::Char), Ok(1));
 
-    assert_equal!(
-        aot::local_size(TyKind::Int(IntTy::I32)),
-        Ok(4)
-    );
+    assert_equal!(aot::local_size(TyKind::Int(IntTy::I32)), Ok(4));
 
-    assert_equal!(
-        aot::local_size(TyKind::Uint(UintTy::U32)),
-        Ok(4)
-    );
+    assert_equal!(aot::local_size(TyKind::Uint(UintTy::U32)), Ok(4));
 
-    assert_equal!(
-        aot::local_size(TyKind::Float(FloatTy::F32)),
-        Ok(4)
-    );
+    assert_equal!(aot::local_size(TyKind::Float(FloatTy::F32)), Ok(4));
+}
+
+fn adt_size<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    adt: AdtDef<'tcx>,
+    gargs: &'tcx GenericArgs<'tcx>,
+) -> Result<usize, String> {
+    adt.variants()
+        .into_iter()
+        .map(|v| {
+            v.fields
+                .iter()
+                .map(|f| match local_size(f.ty(tcx, gargs).kind(), tcx) {
+                    Ok(n) => n,
+                    // TODO handle errors properly
+                    Err(_) => 0,
+                })
+                .sum()
+        })
+        .max()
+        .ok_or(format!("Max failed for {:?} {:?}", adt, gargs))
 }
