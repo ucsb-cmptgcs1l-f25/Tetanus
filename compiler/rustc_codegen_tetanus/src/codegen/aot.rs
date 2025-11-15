@@ -10,13 +10,14 @@ use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_hir::Mutability;
 use rustc_middle::dep_graph::{WorkProduct, WorkProductId};
 use rustc_middle::mir::mono::MonoItem;
-use rustc_middle::mir::{StatementKind, TerminatorKind};
+use rustc_middle::mir::{LocalDecl, StatementKind, TerminatorKind};
 use rustc_middle::ty::{
     AdtDef,
     EarlyBinder,
     // ConstKind,
     GenericArgs,
     Instance,
+    Ty,
     TyCtxt,
     TyKind,
     TypeFoldable,
@@ -185,6 +186,12 @@ where
     )
 }
 
+struct Local<'tcx> {
+    mono_ty: Ty<'tcx>,
+    decl: &'tcx LocalDecl<'tcx>,
+    stack_size: Result<usize, String>,
+}
+
 fn codegen_function<'tcx>(
     tcx: TyCtxt<'tcx>,
     symbol_name: &str,
@@ -216,33 +223,29 @@ fn codegen_function<'tcx>(
         // eprintln!("{:?}\n", decl);
         let mono_ty = monomorphize(tcx, inst, decl.ty);
         let size = local_size(mono_ty.kind(), tcx);
-        locals.push((
-            mono_ty,
-            decl,
-            size.clone().unwrap_or(1) as isize,
-            size.err().unwrap_or("".to_owned()),
-        ));
+        locals.push(Local { mono_ty, decl, stack_size: size });
     }
 
     for (_i, local) in locals.into_iter().enumerate() {
         // Push 0 onto stack
         // TODO make this zero the right number of bytes
-        asm += format!("\tsd\tzero, {}(sp) ", -local.2).as_str();
+        asm += format!("\tsd\tzero, {}(sp) ", -(local.stack_size.clone().unwrap_or(0) as isize))
+            .as_str();
         // comment what this is for
         asm += "; let";
-        if local.1.mutability == Mutability::Mut {
+        if local.decl.mutability == Mutability::Mut {
             asm += " mut";
         }
-        asm += format!(" {:?}", local.0).as_str();
+        asm += format!(" {:?}", local.mono_ty).as_str();
         asm += "\n";
-        if local.3 != "" {
+        if let Err(err) = local.stack_size.clone() {
             asm += "; ";
-            asm += local.3.as_str();
+            asm += err.as_str();
             asm += "\n";
         }
         // Update stack pointer
-        stack_offset -= local.2;
-        asm += format!("\taddi\tsp, sp, -{}\n", local.2).as_str();
+        stack_offset -= local.stack_size.clone().unwrap_or(0) as isize;
+        asm += format!("\taddi\tsp, sp, -{}\n", local.stack_size.clone().unwrap_or(0)).as_str();
     }
 
     for (id, bb) in (*mir.basic_blocks).into_iter().enumerate() {
@@ -322,6 +325,9 @@ fn adt_size<'tcx>(
     adt: AdtDef<'tcx>,
     gargs: &'tcx GenericArgs<'tcx>,
 ) -> Result<usize, String> {
+    if adt.variants().len() == 0 {
+        return Ok(0);
+    };
     adt.variants()
         .into_iter()
         .map(|v| {
@@ -330,7 +336,10 @@ fn adt_size<'tcx>(
                 .map(|f| match local_size(f.ty(tcx, gargs).kind(), tcx) {
                     Ok(n) => n,
                     // TODO handle errors properly
-                    Err(_) => 0,
+                    Err(_err) => {
+                        // eprintln!("error getting size for {:?} error was {}", v.fields, err);
+                        0
+                    }
                 })
                 .sum()
         })
