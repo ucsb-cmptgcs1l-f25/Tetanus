@@ -10,6 +10,7 @@
 
 // #![deny(warnings)]
 #![feature(rustc_private)]
+#![feature(box_patterns)]
 
 #[allow(unused_extern_crates)]
 extern crate rustc_driver;
