@@ -10,7 +10,7 @@ use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_hir::Mutability;
 use rustc_middle::dep_graph::{WorkProduct, WorkProductId};
 use rustc_middle::mir::mono::MonoItem;
-use rustc_middle::mir::{LocalDecl, StatementKind, TerminatorKind};
+use rustc_middle::mir::{BasicBlock, LocalDecl, Operand, StatementKind, TerminatorKind};
 use rustc_middle::ty::{
     AdtDef,
     EarlyBinder,
@@ -186,10 +186,16 @@ where
     )
 }
 
+#[derive(Clone, Debug)]
 struct Local<'tcx> {
     mono_ty: Ty<'tcx>,
     decl: &'tcx LocalDecl<'tcx>,
     stack_size: Result<usize, String>,
+}
+
+fn j_addr_for(cur_idx: usize, target: BasicBlock) -> String {
+    let tar_idx = usize::from(target);
+    format!("{}{}", tar_idx, if tar_idx > cur_idx { "f" } else { "b" })
 }
 
 fn codegen_function<'tcx>(
@@ -226,7 +232,7 @@ fn codegen_function<'tcx>(
         locals.push(Local { mono_ty, decl, stack_size: size });
     }
 
-    for (_i, local) in locals.into_iter().enumerate() {
+    for (_i, local) in locals.iter().enumerate() {
         // Push 0 onto stack
         // TODO make this zero the right number of bytes
         asm += format!("\tsd\tzero, {}(sp) ", -(local.stack_size.clone().unwrap_or(0) as isize))
@@ -258,16 +264,49 @@ fn codegen_function<'tcx>(
             }
         }
         // generate terminator
-        match bb.terminator().kind {
-            TerminatorKind::Goto { target } => asm += format!("\tj {:?}\n", target).as_str(),
+        match &bb.terminator().kind {
+            TerminatorKind::Goto { target } => {
+                asm += format!("\tj {}\n", j_addr_for(id, *target)).as_str()
+            }
             TerminatorKind::Return => asm += "\tj end\n",
+            TerminatorKind::SwitchInt { discr: Operand::Copy(place), targets }
+            | TerminatorKind::SwitchInt { discr: Operand::Move(place), targets } => {
+                asm += format!("\t; branching on {:?}\n", place).as_str();
+                let local_place_idx = usize::from(place.local);
+
+                for (discr, target) in targets.iter() {
+                    asm += format!("\t; {discr} -> {target:?}\n").as_str();
+                    asm += format!("\tli\tt0, {discr}\n").as_str();
+                    // TODO properly handle discriminant size
+                    // TODO properly handle place finding
+                    asm += format!(
+                        "\tld\tt1, {}(sp)\n",
+                        locals[local_place_idx..]
+                            .iter()
+                            .map(|l| l.stack_size.as_ref().unwrap_or(&0))
+                            .sum::<usize>()
+                    )
+                    .as_str();
+                    asm += format!("\tbeq\tt0, t1, {}\n", j_addr_for(id, target)).as_str();
+                }
+                let otherwise_idx = usize::from(targets.otherwise());
+                asm += format!(
+                    "\t{}j {}\n",
+                    // add comment to show that we want to jump to next block
+                    // but ommit actual instruction so w just fall through
+                    // yay optimizations
+                    if otherwise_idx == id + 1 { "; " } else { "" },
+                    j_addr_for(id, targets.otherwise())
+                )
+                .as_str();
+            }
             _ => asm += format!("\t; TODO: {:?}\n\n", bb.terminator().kind).as_str(),
         }
     }
 
     asm += "end:\n";
-    asm += format!("\taddi\tsp, sp, {}", -stack_offset).as_str();
-    asm += "\nret\n\n";
+    asm += format!("\taddi\tsp, sp, {}\n", -stack_offset).as_str();
+    asm += "\tret\n\n";
     return asm;
 }
 
