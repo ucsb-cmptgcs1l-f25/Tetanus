@@ -32,6 +32,9 @@ use rustc_session::config::{OutputFilenames, OutputType};
 // use rustc_span::DUMMY_SP;
 use crate::CPU_NAME;
 
+const COMMENT_CHAR: &str = "#";
+const END_BB_IDX: u32 = 0x0FFFFFFF;
+
 #[allow(dead_code)]
 pub(crate) struct ModuleCodegenResult {
     module_regular: CompiledModule,
@@ -241,14 +244,14 @@ fn codegen_function<'tcx>(
         asm += format!("\tsd\tzero, {}(sp) ", -(local.stack_size.clone().unwrap_or(0) as isize))
             .as_str();
         // comment what this is for
-        asm += "; let";
+        write!(asm, "{COMMENT_CHAR} let").unwrap();
         if local.decl.mutability == Mutability::Mut {
             asm += " mut";
         }
         asm += format!(" {:?}", local.mono_ty).as_str();
         asm += "\n";
         if let Err(err) = local.stack_size.clone() {
-            asm += "; ";
+            write!(asm, "{COMMENT_CHAR} ").unwrap();
             asm += err.as_str();
             asm += "\n";
         }
@@ -277,11 +280,11 @@ fn codegen_function<'tcx>(
                 // This is a nop rn, but could be useful later
                 Coverage(_) => {}
                 Assign(box (place, rval)) => {
-                    writeln!(asm, "\t; TODO: assign {rval:?} to {place:?}").unwrap();
+                    writeln!(asm, "\t{COMMENT_CHAR} TODO: assign {rval:?} to {place:?}").unwrap();
                     writeln!(asm, "{}", get_assignment_asm(tcx, &locals, place, rval)).unwrap();
                 }
 
-                _ => asm += format!("\t; TODO: {:?}\n", statement.kind).as_str(),
+                _ => asm += format!("\t{COMMENT_CHAR} TODO: {:?}\n", statement.kind).as_str(),
             }
         }
         // generate terminator
@@ -289,13 +292,13 @@ fn codegen_function<'tcx>(
             TerminatorKind::Goto { target } => {
                 asm += format!("\tj {}\n", j_addr_for(id, *target)).as_str()
             }
-            TerminatorKind::Return => asm += "\tj end\n",
+            TerminatorKind::Return => writeln!(asm, "\tj {END_BB_IDX}f").unwrap(),
             TerminatorKind::SwitchInt { discr: Operand::Copy(place), targets }
             | TerminatorKind::SwitchInt { discr: Operand::Move(place), targets } => {
-                asm += format!("\t; branching on {:?}\n", place).as_str();
+                asm += format!("\t{COMMENT_CHAR} branching on {:?}\n", place).as_str();
 
                 for (discr, target) in targets.iter() {
-                    asm += format!("\t; {discr} -> {target:?}\n").as_str();
+                    asm += format!("\t{COMMENT_CHAR} {discr} -> {target:?}\n").as_str();
                     asm += format!("\tli\tt0, {discr}\n").as_str();
                     // TODO properly handle discriminant size
                     // TODO properly handle place finding
@@ -309,16 +312,16 @@ fn codegen_function<'tcx>(
                     // add comment to show that we want to jump to next block
                     // but ommit actual instruction so w just fall through
                     // yay optimizations
-                    if otherwise_idx == id + 1 { "; " } else { "" },
+                    if otherwise_idx == id + 1 { &COMMENT_CHAR } else { "" },
                     j_addr_for(id, targets.otherwise())
                 )
                 .as_str();
             }
-            _ => asm += format!("\t; TODO: {:?}\n\n", bb.terminator().kind).as_str(),
+            _ => asm += format!("\t{COMMENT_CHAR} TODO: {:?}\n\n", bb.terminator().kind).as_str(),
         }
     }
 
-    asm += "end:\n";
+    writeln!(asm, "{END_BB_IDX}:").unwrap();
     asm += format!("\taddi\tsp, sp, {}\n", -stack_offset).as_str();
     asm += "\tret\n\n";
     return asm;
@@ -412,18 +415,18 @@ fn get_assignment_asm<'tcx>(
     use rustc_middle::mir::Rvalue::*;
     match rvalue {
         Use(operand) => {
-            writeln!(asm, "\t; Use({operand:?})").unwrap();
+            writeln!(asm, "\t{COMMENT_CHAR} Use({operand:?})").unwrap();
             writeln!(asm, "{}", load_operand(tcx, locals, operand, "t0")).unwrap();
         }
 
         _ => {
-            return format!("\t; unknown rvalue {rvalue:?} when trying to assign to {place:?}");
+            return format!("\t{COMMENT_CHAR} unknown rvalue {rvalue:?} when trying to assign to {place:?}");
         }
     }
     // TODO handle non local Places
     if place.projection.len() > 0 {
         return format!(
-            "\t; place has projections {place:?} when trying to assign {rvalue:?} to it"
+            "\t{COMMENT_CHAR} place has projections {place:?} when trying to assign {rvalue:?} to it"
         );
     }
 
@@ -446,13 +449,13 @@ fn load_operand<'tcx>(
             match evaluated_con {
                 Scalar(Int(scalar_int)) => {
                     return format!(
-                        "\t; loading {evaluated_con:?}\n\tli\t0x{:x}\n",
+                        "\t{COMMENT_CHAR} loading {evaluated_con:?}\n\tli\t{dest}, 0x{:x}\n",
                         scalar_int.to_bits_unchecked()
                     );
                 }
                 _ => {}
             }
-            return format!("\t; loading {evaluated_con:?}\n");
+            return format!("\t{COMMENT_CHAR} loading {evaluated_con:?}\n");
         }
     }
 }
@@ -493,7 +496,7 @@ fn place_to_reg_recursive<'tcx>(
                 place_to_reg_recursive(tcx, locals, place, dest, projection_idx + 1)
             )
         }
-        _ => format!("\tli t0, 0 ; unknown projection {:?}", place.projection[projection_idx]),
+        _ => format!("\tli t0, 0 {COMMENT_CHAR} unknown projection {:?}", place.projection[projection_idx]),
     };
 }
 
