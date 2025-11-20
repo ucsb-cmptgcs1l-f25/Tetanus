@@ -1,9 +1,9 @@
+use std::fmt::Write as fmtWrite;
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::fmt::Write as fmtWrite;
 
 use rustc_codegen_ssa::{CodegenResults, CompiledModule, CrateInfo, ModuleKind};
 use rustc_data_structures::fx::FxIndexMap;
@@ -11,7 +11,9 @@ use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_hir::Mutability;
 use rustc_middle::dep_graph::{WorkProduct, WorkProductId};
 use rustc_middle::mir::mono::MonoItem;
-use rustc_middle::mir::{BasicBlock, LocalDecl, Operand, TerminatorKind, Rvalue, Place};
+use rustc_middle::mir::{
+    BasicBlock, ConstOperand, LocalDecl, Operand, Place, Rvalue, TerminatorKind,
+};
 use rustc_middle::ty::{
     AdtDef,
     EarlyBinder,
@@ -271,7 +273,7 @@ fn codegen_function<'tcx>(
                 | AscribeUserType(..)
                 | ConstEvalCounter
                 | Nop
-                | BackwardIncompatibleDropHint{..} => {}
+                | BackwardIncompatibleDropHint { .. } => {}
                 // This is a nop rn, but could be useful later
                 Coverage(_) => {}
                 Assign(box (place, rval)) => {
@@ -297,11 +299,8 @@ fn codegen_function<'tcx>(
                     asm += format!("\tli\tt0, {discr}\n").as_str();
                     // TODO properly handle discriminant size
                     // TODO properly handle place finding
-                    asm += format!(
-                        "\tld\tt1, {}(sp)\n",
-                        stack_offset_for(&locals, place.local)
-                    )
-                    .as_str();
+                    asm += format!("\tld\tt1, {}(sp)\n", stack_offset_for(&locals, place.local))
+                        .as_str();
                     asm += format!("\tbeq\tt0, t1, {}\n", j_addr_for(id, target)).as_str();
                 }
                 let otherwise_idx = usize::from(targets.otherwise());
@@ -408,7 +407,7 @@ fn get_assignment_asm<'tcx>(
     rvalue: &Rvalue<'tcx>,
 ) -> String {
     let mut asm = String::new();
-    
+
     // Calculate result
     use rustc_middle::mir::Rvalue::*;
     match rvalue {
@@ -423,7 +422,9 @@ fn get_assignment_asm<'tcx>(
     }
     // TODO handle non local Places
     if place.projection.len() > 0 {
-        return format!("\t; place has projections {place:?} when trying to assign {rvalue:?} to it");
+        return format!(
+            "\t; place has projections {place:?} when trying to assign {rvalue:?} to it"
+        );
     }
 
     return asm;
@@ -438,7 +439,21 @@ fn load_operand<'tcx>(
     use rustc_middle::mir::Operand::*;
     match op {
         Move(place) | Copy(place) => place_to_reg(tcx, locals, &place, dest),
-        Constant (..)=> format!("\t; constant operand {op:?}"),
+        Constant(box ConstOperand { const_: con, span, .. }) => {
+            use rustc_middle::mir::ConstValue::*;
+            use rustc_middle::mir::interpret::Scalar::*;
+            let evaluated_con = con.eval(tcx, TypingEnv::fully_monomorphized(), *span).unwrap();
+            match evaluated_con {
+                Scalar(Int(scalar_int)) => {
+                    return format!(
+                        "\t; loading {evaluated_con:?}\n\tli\t0x{:x}\n",
+                        scalar_int.to_bits_unchecked()
+                    );
+                }
+                _ => {}
+            }
+            return format!("\t; loading {evaluated_con:?}\n");
+        }
     }
 }
 
@@ -448,13 +463,7 @@ fn place_to_reg<'tcx>(
     place: &Place<'tcx>,
     dest: &str,
 ) -> String {
-    place_to_reg_recursive(
-        tcx,
-        locals,
-        place,
-        dest,
-        0
-    )
+    place_to_reg_recursive(tcx, locals, place, dest, 0)
 }
 
 fn place_to_reg_recursive<'tcx>(
@@ -466,10 +475,11 @@ fn place_to_reg_recursive<'tcx>(
 ) -> String {
     if projection_idx == 0 {
         // TODO load right number of bytes
-        return format!("\tld t0, {}(sp)\n{}", stack_offset_for(locals, place.local),
-            place_to_reg_recursive(
-                tcx, locals, place, dest, 1
-            ));
+        return format!(
+            "\tld t0, {}(sp)\n{}",
+            stack_offset_for(locals, place.local),
+            place_to_reg_recursive(tcx, locals, place, dest, 1)
+        );
     }
     if projection_idx >= place.projection.len() {
         return String::new();
@@ -478,20 +488,15 @@ fn place_to_reg_recursive<'tcx>(
     return match &place.projection[projection_idx] {
         Deref => {
             // TODO load right number of bytes
-            format!("\tld t0, 0(t0)\n{}", place_to_reg_recursive(
-                tcx, locals, place, dest, projection_idx+ 1
-            ))
-        },
-        _ => format!("\tli t0, 0 ; unknown projection {:?}", place.projection[projection_idx])
-    }
+            format!(
+                "\tld t0, 0(t0)\n{}",
+                place_to_reg_recursive(tcx, locals, place, dest, projection_idx + 1)
+            )
+        }
+        _ => format!("\tli t0, 0 ; unknown projection {:?}", place.projection[projection_idx]),
+    };
 }
 
-fn stack_offset_for(
-    locals: &Vec<Local<'_>>,
-    target: rustc_middle::mir::Local
-) -> usize {
-    locals[usize::from(target)..]
-                            .iter()
-                            .map(|l| l.stack_size.as_ref().unwrap_or(&0))
-                            .sum::<usize>()
+fn stack_offset_for(locals: &Vec<Local<'_>>, target: rustc_middle::mir::Local) -> usize {
+    locals[usize::from(target)..].iter().map(|l| l.stack_size.as_ref().unwrap_or(&0)).sum::<usize>()
 }
