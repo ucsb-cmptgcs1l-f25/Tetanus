@@ -295,7 +295,7 @@ fn codegen_function<'tcx>(
             TerminatorKind::Return => writeln!(asm, "\tj {END_BB_IDX}f").unwrap(),
             TerminatorKind::SwitchInt { discr: Operand::Copy(place), targets }
             | TerminatorKind::SwitchInt { discr: Operand::Move(place), targets } => {
-                asm += format!("\t{COMMENT_CHAR} branching on {:?}\n", place).as_str();
+                asm += format!("\t{COMMENT_CHAR} branching on {:?} {:?}\n", place, place.projection).as_str();
 
                 for (discr, target) in targets.iter() {
                     asm += format!("\t{COMMENT_CHAR} {discr} -> {target:?}\n").as_str();
@@ -415,12 +415,15 @@ fn get_assignment_asm<'tcx>(
     use rustc_middle::mir::Rvalue::*;
     match rvalue {
         Use(operand) => {
-            writeln!(asm, "\t{COMMENT_CHAR} Use({operand:?})").unwrap();
+            writeln!(asm, "\t{COMMENT_CHAR} Place {place:?}{:?} = Use({operand:?})", place.projection).unwrap();
             writeln!(asm, "{}", load_operand(tcx, locals, operand, "t0")).unwrap();
+            writeln!(asm, "{}", reg_to_place(tcx, locals, place, "t0")).unwrap();
         }
 
         _ => {
-            return format!("\t{COMMENT_CHAR} unknown rvalue {rvalue:?} when trying to assign to {place:?}");
+            return format!(
+                "\t{COMMENT_CHAR} unknown rvalue {rvalue:?} when trying to assign to {place:?}"
+            );
         }
     }
     // TODO handle non local Places
@@ -496,7 +499,58 @@ fn place_to_reg_recursive<'tcx>(
                 place_to_reg_recursive(tcx, locals, place, dest, projection_idx + 1)
             )
         }
-        _ => format!("\tli t0, 0 {COMMENT_CHAR} unknown projection {:?}", place.projection[projection_idx]),
+        _ => format!(
+            "\tli t0, 0 {COMMENT_CHAR} unknown projection {:?}",
+            place.projection[projection_idx]
+        ),
+    };
+}
+
+fn reg_to_place<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    locals: &Vec<Local<'_>>,
+    place: &Place<'tcx>,
+    src: &str,
+) -> String {
+    if place.projection.len() == 0 {
+        return format!("\tsd {}, {}(sp)\n", src, stack_offset_for(locals, place.local));
+    }
+    reg_to_place_recursive(tcx, locals, place, src, 0)
+}
+
+fn reg_to_place_recursive<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    locals: &Vec<Local<'_>>,
+    place: &Place<'tcx>,
+    src: &str,
+    projection_idx: usize,
+) -> String {
+    let scratch_reg = if src == "t0" { "t1" } else { "t0" };
+    if projection_idx == 0 {
+        // TODO load right number of bytes
+        return format!(
+            "\tld {scratch_reg}, {}(sp)\n{}",
+            stack_offset_for(locals, place.local),
+            reg_to_place_recursive(tcx, locals, place, src, 1)
+        );
+    }
+    if projection_idx >= place.projection.len() {
+        // TODO store correct number of bytes
+        return format!("\tsd\t{src}, 0({scratch_reg})\n");
+    }
+    use rustc_middle::mir::ProjectionElem::*;
+    return match &place.projection[projection_idx] {
+        Deref => {
+            // TODO load right number of bytes
+            format!(
+                "\tld {scratch_reg}, 0(t0)\n{}",
+                reg_to_place_recursive(tcx, locals, place, src, projection_idx + 1)
+            )
+        }
+        _ => format!(
+            "\tli {scratch_reg}, 0 {COMMENT_CHAR} unknown projection {:?}\n",
+            place.projection[projection_idx]
+        ),
     };
 }
 
