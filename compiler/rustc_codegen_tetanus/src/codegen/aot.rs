@@ -418,7 +418,27 @@ fn get_assignment_asm<'tcx>(
             writeln!(asm, "\t{COMMENT_CHAR} Place {place:?}{:?} = Use({operand:?})", place.projection).unwrap();
             writeln!(asm, "{}", load_operand(tcx, locals, operand, "t0")).unwrap();
             writeln!(asm, "{}", reg_to_place(tcx, locals, place, "t0")).unwrap();
-        }
+        },
+        UnaryOp(operation, operand) => {
+            use rustc_middle::mir::UnOp::*;
+            writeln!(asm, "\t{COMMENT_CHAR} Place {place:?}{:?} = {operation:?}({operand:?})", place.projection).unwrap();
+            match operation {
+                Not => {
+                    writeln!(asm, "{}", load_operand(tcx, &locals, operand, "t0")).unwrap();
+                    writeln!(asm, "\tnot\tt0, t0").unwrap();
+                    writeln!(asm, "{}", reg_to_place(tcx, &locals, place, "t0")).unwrap();
+                }
+                Neg => {
+                    writeln!(asm, "{}", load_operand(tcx, &locals, operand, "t0")).unwrap();
+                    writeln!(asm, "\tneg\tt0, t0").unwrap();
+                    writeln!(asm, "{}", reg_to_place(tcx, &locals, place, "t0")).unwrap();
+                }
+                PtrMetadata => {
+                    writeln!(asm, "\t{COMMENT_CHAR} TODO Metadata").unwrap();
+                }
+                
+            }
+        },
 
         _ => {
             return format!(
@@ -435,6 +455,32 @@ fn get_assignment_asm<'tcx>(
 
     return asm;
 }
+
+// fn get_operand_ty<'tcx>(
+//     tcx: TyCtxt<'tcx>,
+//     locals: &Vec<Local<'_>>,
+//     op: &Operand<'tcx>,
+// ) -> Ty<'tcx> {
+//     use rustc_middle::mir::Operand::*;
+//     match op {
+//         Move(place) | Copy(place) => place_to_reg(tcx, locals, &place, dest),
+//         Constant(box ConstOperand { const_: con, span, .. }) => {
+//             use rustc_middle::mir::ConstValue::*;
+//             use rustc_middle::mir::interpret::Scalar::*;
+//             let evaluated_con = con.eval(tcx, TypingEnv::fully_monomorphized(), *span).unwrap();
+//             match evaluated_con {
+//                 Scalar(Int(scalar_int)) => {
+//                     return format!(
+//                         "\t{COMMENT_CHAR} loading {evaluated_con:?}\n\tli\t{dest}, 0x{:x}\n",
+//                         scalar_int.to_bits_unchecked()
+//                     );
+//                 }
+//                 _ => {}
+//             }
+//             return format!("\t{COMMENT_CHAR} loading {evaluated_con:?}\n");
+//         }
+//     }   
+// }
 
 fn load_operand<'tcx>(
     tcx: TyCtxt<'tcx>,
@@ -472,6 +518,7 @@ fn place_to_reg<'tcx>(
     place_to_reg_recursive(tcx, locals, place, dest, 0)
 }
 
+// TODO make amore general place traversal algo
 fn place_to_reg_recursive<'tcx>(
     tcx: TyCtxt<'tcx>,
     locals: &Vec<Local<'_>>,
