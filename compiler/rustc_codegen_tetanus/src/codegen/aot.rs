@@ -238,13 +238,9 @@ fn codegen_function<'tcx>(
         locals.push(Local { mono_ty, decl, stack_size: size });
     }
 
-    for (_i, local) in locals.iter().enumerate() {
-        // Push 0 onto stack
-        // TODO make this zero the right number of bytes
-        asm += format!("\tsd\tzero, {}(sp) ", -(local.stack_size.clone().unwrap_or(0) as isize))
-            .as_str();
+    for (i, local) in locals.iter().enumerate() {
         // comment what this is for
-        write!(asm, "{COMMENT_CHAR} let").unwrap();
+        write!(asm, "\t{COMMENT_CHAR} _{i} let").unwrap();
         if local.decl.mutability == Mutability::Mut {
             asm += " mut";
         }
@@ -295,7 +291,9 @@ fn codegen_function<'tcx>(
             TerminatorKind::Return => writeln!(asm, "\tj {END_BB_IDX}f").unwrap(),
             TerminatorKind::SwitchInt { discr: Operand::Copy(place), targets }
             | TerminatorKind::SwitchInt { discr: Operand::Move(place), targets } => {
-                asm += format!("\t{COMMENT_CHAR} branching on {:?} {:?}\n", place, place.projection).as_str();
+                asm +=
+                    format!("\t{COMMENT_CHAR} branching on {:?} {:?}\n", place, place.projection)
+                        .as_str();
 
                 for (discr, target) in targets.iter() {
                     asm += format!("\t{COMMENT_CHAR} {discr} -> {target:?}\n").as_str();
@@ -405,7 +403,7 @@ fn adt_size<'tcx>(
 
 fn get_assignment_asm<'tcx>(
     tcx: TyCtxt<'tcx>,
-    locals: &Vec<Local<'_>>,
+    locals: &Vec<Local<'tcx>>,
     place: &Place<'tcx>,
     rvalue: &Rvalue<'tcx>,
 ) -> String {
@@ -415,13 +413,23 @@ fn get_assignment_asm<'tcx>(
     use rustc_middle::mir::Rvalue::*;
     match rvalue {
         Use(operand) => {
-            writeln!(asm, "\t{COMMENT_CHAR} Place {place:?}{:?} = Use({operand:?})", place.projection).unwrap();
+            writeln!(
+                asm,
+                "\t{COMMENT_CHAR} Place {place:?}{:?} = Use({operand:?})",
+                place.projection
+            )
+            .unwrap();
             writeln!(asm, "{}", load_operand(tcx, locals, operand, "t0")).unwrap();
             writeln!(asm, "{}", reg_to_place(tcx, locals, place, "t0")).unwrap();
-        },
+        }
         UnaryOp(operation, operand) => {
             use rustc_middle::mir::UnOp::*;
-            writeln!(asm, "\t{COMMENT_CHAR} Place {place:?}{:?} = {operation:?}({operand:?})", place.projection).unwrap();
+            writeln!(
+                asm,
+                "\t{COMMENT_CHAR} Place {place:?}{:?} = {operation:?}({operand:?})",
+                place.projection
+            )
+            .unwrap();
             match operation {
                 Not => {
                     writeln!(asm, "{}", load_operand(tcx, &locals, operand, "t0")).unwrap();
@@ -436,9 +444,8 @@ fn get_assignment_asm<'tcx>(
                 PtrMetadata => {
                     writeln!(asm, "\t{COMMENT_CHAR} TODO Metadata").unwrap();
                 }
-                
             }
-        },
+        }
 
         _ => {
             return format!(
@@ -479,12 +486,12 @@ fn get_assignment_asm<'tcx>(
 //             }
 //             return format!("\t{COMMENT_CHAR} loading {evaluated_con:?}\n");
 //         }
-//     }   
+//     }
 // }
 
 fn load_operand<'tcx>(
     tcx: TyCtxt<'tcx>,
-    locals: &Vec<Local<'_>>,
+    locals: &Vec<Local<'tcx>>,
     op: &Operand<'tcx>,
     dest: &str,
 ) -> String {
@@ -509,9 +516,32 @@ fn load_operand<'tcx>(
     }
 }
 
+fn place_ty<'tcx>(
+    _tcx: TyCtxt<'tcx>,
+    locals: &Vec<Local<'tcx>>,
+    place: &Place<'tcx>,
+    projection_limit: usize,
+) -> Ty<'tcx> {
+    let mut ty = locals[usize::from(place.local)].mono_ty;
+
+    for proj in place.projection.iter().take(projection_limit) {
+        use rustc_middle::mir::ProjectionElem::*;
+        match proj {
+            Deref => match ty.kind() {
+                TyKind::Ref(_, d_ty, _) => ty = *d_ty,
+                TyKind::RawPtr(d_ty, _) => ty = *d_ty,
+                _ => {}
+            },
+            _ => {} // TODO
+        }
+    }
+
+    return ty;
+}
+
 fn place_to_reg<'tcx>(
     tcx: TyCtxt<'tcx>,
-    locals: &Vec<Local<'_>>,
+    locals: &Vec<Local<'tcx>>,
     place: &Place<'tcx>,
     dest: &str,
 ) -> String {
@@ -521,15 +551,21 @@ fn place_to_reg<'tcx>(
 // TODO make amore general place traversal algo
 fn place_to_reg_recursive<'tcx>(
     tcx: TyCtxt<'tcx>,
-    locals: &Vec<Local<'_>>,
+    locals: &Vec<Local<'tcx>>,
     place: &Place<'tcx>,
     dest: &str,
     projection_idx: usize,
 ) -> String {
     if projection_idx == 0 {
-        // TODO load right number of bytes
+        let load_type = match locals[usize::from(place.local)].stack_size {
+            Ok(1) => "b",
+            Ok(2) => "s",
+            Ok(4) => "w",
+            Ok(8) => "d",
+            _ => "d", // TODO make this not bad
+        };
         return format!(
-            "\tld t0, {}(sp)\n{}",
+            "\tl{load_type} t0, {}(sp)\n{}",
             stack_offset_for(locals, place.local),
             place_to_reg_recursive(tcx, locals, place, dest, 1)
         );
@@ -540,9 +576,22 @@ fn place_to_reg_recursive<'tcx>(
     use rustc_middle::mir::ProjectionElem::*;
     return match &place.projection[projection_idx] {
         Deref => {
-            // TODO load right number of bytes
+            let place_ty = place_ty(
+                tcx,
+                &locals,
+                &Place { local: place.local, projection: place.projection },
+                projection_idx,
+            );
+
+            let load_type = match local_size(place_ty.kind(), tcx) {
+                Ok(1) => "b",
+                Ok(2) => "s",
+                Ok(4) => "w",
+                Ok(8) => "d",
+                _ => "d", // TODO make this not bad
+            };
             format!(
-                "\tld t0, 0(t0)\n{}",
+                "\tl{load_type}\tt0, 0(t0)\n{}",
                 place_to_reg_recursive(tcx, locals, place, dest, projection_idx + 1)
             )
         }
@@ -555,42 +604,81 @@ fn place_to_reg_recursive<'tcx>(
 
 fn reg_to_place<'tcx>(
     tcx: TyCtxt<'tcx>,
-    locals: &Vec<Local<'_>>,
+    locals: &Vec<Local<'tcx>>,
     place: &Place<'tcx>,
     src: &str,
 ) -> String {
     if place.projection.len() == 0 {
-        return format!("\tsd {}, {}(sp)\n", src, stack_offset_for(locals, place.local));
+        let store_type = match locals[usize::from(place.local)].stack_size {
+            Ok(1) => "b",
+            Ok(2) => "s",
+            Ok(4) => "w",
+            Ok(8) => "d",
+            _ => "d", // TODO make this not bad
+        };
+        return format!("\ts{store_type}\t{}, {}(sp)\n", src, stack_offset_for(locals, place.local));
     }
     reg_to_place_recursive(tcx, locals, place, src, 0)
 }
 
 fn reg_to_place_recursive<'tcx>(
     tcx: TyCtxt<'tcx>,
-    locals: &Vec<Local<'_>>,
+    locals: &Vec<Local<'tcx>>,
     place: &Place<'tcx>,
     src: &str,
     projection_idx: usize,
 ) -> String {
     let scratch_reg = if src == "t0" { "t1" } else { "t0" };
     if projection_idx == 0 {
-        // TODO load right number of bytes
+        let load_type = match locals[usize::from(place.local)].stack_size {
+            Ok(1) => "b",
+            Ok(2) => "s",
+            Ok(4) => "w",
+            Ok(8) => "d",
+            _ => "d", // TODO make this not bad
+        };
         return format!(
-            "\tld {scratch_reg}, {}(sp)\n{}",
+            "\tl{load_type} {scratch_reg}, {}(sp)\n{}",
             stack_offset_for(locals, place.local),
             reg_to_place_recursive(tcx, locals, place, src, 1)
         );
     }
     if projection_idx >= place.projection.len() {
-        // TODO store correct number of bytes
-        return format!("\tsd\t{src}, 0({scratch_reg})\n");
+        let place_ty = place_ty(
+            tcx,
+            &locals,
+            &Place { local: place.local, projection: place.projection },
+            projection_idx,
+        );
+
+        let store_type = match local_size(place_ty.kind(), tcx) {
+            Ok(1) => "b",
+            Ok(2) => "s",
+            Ok(4) => "w",
+            Ok(8) => "d",
+            _ => "d", // TODO make this not bad
+        };
+        return format!("\ts{store_type}\t{src}, 0({scratch_reg})\n");
     }
     use rustc_middle::mir::ProjectionElem::*;
     return match &place.projection[projection_idx] {
         Deref => {
-            // TODO load right number of bytes
+            let place_ty = place_ty(
+                tcx,
+                &locals,
+                &Place { local: place.local, projection: place.projection },
+                projection_idx,
+            );
+
+            let load_type = match local_size(place_ty.kind(), tcx) {
+                Ok(1) => "b",
+                Ok(2) => "s",
+                Ok(4) => "w",
+                Ok(8) => "d",
+                _ => "d", // TODO make this not bad
+            };
             format!(
-                "\tld {scratch_reg}, 0(t0)\n{}",
+                "\tl{load_type} {scratch_reg}, 0(t0)\n{}",
                 reg_to_place_recursive(tcx, locals, place, src, projection_idx + 1)
             )
         }
