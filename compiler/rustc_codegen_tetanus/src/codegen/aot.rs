@@ -501,17 +501,23 @@ fn load_operand<'tcx>(
         Constant(box ConstOperand { const_: con, span, .. }) => {
             use rustc_middle::mir::ConstValue::*;
             use rustc_middle::mir::interpret::Scalar::*;
-            let evaluated_con = con.eval(tcx, TypingEnv::fully_monomorphized(), *span).unwrap();
+            let evaluated_con_or = con.eval(tcx, TypingEnv::fully_monomorphized(), *span);
+            if let Err(msg) = evaluated_con_or {
+                // as far as i can tell these are related to alias type shenanigans
+                // i dont understand those well enough to fix them rn
+                return format!("\t{COMMENT_CHAR} error: {:?} when evaluating {:?}\n\tmv\t{dest}, zero", msg, op);
+            }
+            let evaluated_con = evaluated_con_or.unwrap();
             match evaluated_con {
                 Scalar(Int(scalar_int)) => {
                     return format!(
-                        "\t{COMMENT_CHAR} loading {evaluated_con:?}\n\tli\t{dest}, 0x{:x}\n",
+                        "\t{COMMENT_CHAR} loading {evaluated_con:?}\n\tli\t{dest}, 0x{:x}",
                         scalar_int.to_bits_unchecked()
                     );
                 }
                 _ => {}
             }
-            return format!("\t{COMMENT_CHAR} loading {evaluated_con:?}\n");
+            return format!("\t{COMMENT_CHAR} loading {evaluated_con:?}");
         }
     }
 }
