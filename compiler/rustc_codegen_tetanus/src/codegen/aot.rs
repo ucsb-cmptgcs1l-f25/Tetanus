@@ -276,7 +276,10 @@ fn codegen_function<'tcx>(
                 // This is a nop rn, but could be useful later
                 Coverage(_) => {}
                 Assign(box (place, rval)) => {
-                    writeln!(asm, "\t{COMMENT_CHAR} TODO: assign {rval:?} to {place:?}").unwrap();
+                    // This is erroring in some cases when formatting rvalues (adts i think)
+                    let diag = tcx.dcx().struct_span_err(statement.source_info.span, "backend error while formatting rvalue");
+                    writeln!(asm, "\t{COMMENT_CHAR} TODO: assign {rval:#?} to {place:?}").unwrap();
+                    diag.emit();
                     writeln!(asm, "{}", get_assignment_asm(tcx, &locals, place, rval)).unwrap();
                 }
 
@@ -501,11 +504,23 @@ fn load_operand<'tcx>(
         Constant(box ConstOperand { const_: con, span, .. }) => {
             use rustc_middle::mir::ConstValue::*;
             use rustc_middle::mir::interpret::Scalar::*;
-            let evaluated_con_or = con.eval(tcx, TypingEnv::fully_monomorphized(), *span);
+            let norm_con_or = tcx.try_normalize_erasing_regions(TypingEnv::fully_monomorphized(), *con);
+            if let Err(msg) = norm_con_or {
+                // this happens on Box<any> and maybe others
+                // i dont understand those well enough to fix them rn
+                return format!(
+                    "\t{COMMENT_CHAR} error: {:?} when evaluating {:?}\n\tmv\t{dest}, zero",
+                    msg, op
+                );
+            }
+            let evaluated_con_or = norm_con_or.unwrap().eval(tcx, TypingEnv::fully_monomorphized(), *span);
             if let Err(msg) = evaluated_con_or {
                 // as far as i can tell these are related to alias type shenanigans
                 // i dont understand those well enough to fix them rn
-                return format!("\t{COMMENT_CHAR} error: {:?} when evaluating {:?}\n\tmv\t{dest}, zero", msg, op);
+                return format!(
+                    "\t{COMMENT_CHAR} error: {:?} when evaluating {:?}\n\tmv\t{dest}, zero",
+                    msg, op
+                );
             }
             let evaluated_con = evaluated_con_or.unwrap();
             match evaluated_con {
@@ -622,7 +637,11 @@ fn reg_to_place<'tcx>(
             Ok(8) => "d",
             _ => "d", // TODO make this not bad
         };
-        return format!("\ts{store_type}\t{}, {}(sp)\n", src, stack_offset_for(locals, place.local));
+        return format!(
+            "\ts{store_type}\t{}, {}(sp)\n",
+            src,
+            stack_offset_for(locals, place.local)
+        );
     }
     reg_to_place_recursive(tcx, locals, place, src, 0)
 }
