@@ -253,8 +253,8 @@ fn codegen_function<'tcx>(
         }
         // Update stack pointer
         stack_offset -= local.stack_size.clone().unwrap_or(0) as isize;
-        asm += format!("\taddi\tsp, sp, -{}\n", local.stack_size.clone().unwrap_or(0)).as_str();
     }
+    asm += format!("\taddi\tsp, sp, {}\n", stack_offset).as_str();
 
     for (id, bb) in (*mir.basic_blocks).into_iter().enumerate() {
         asm += format!("{:?}:\n", id).as_str();
@@ -278,7 +278,7 @@ fn codegen_function<'tcx>(
                 Assign(box (place, rval)) => {
                     // This is erroring in some cases when formatting rvalues (adts i think)
                     let diag = tcx.dcx().struct_span_err(statement.source_info.span, "backend error while formatting rvalue");
-                    writeln!(asm, "\t{COMMENT_CHAR} TODO: assign {rval:#?} to {place:?}").unwrap();
+                    writeln!(asm, "\t{COMMENT_CHAR} assign {rval:?} to {place:?}").unwrap();
                     diag.emit();
                     writeln!(asm, "{}", get_assignment_asm(tcx, &locals, place, rval)).unwrap();
                 }
@@ -449,6 +449,82 @@ fn get_assignment_asm<'tcx>(
                 }
             }
         }
+        BinaryOp(operation, box (op1, op2)) => {
+            writeln!(asm, "{}", load_operand(tcx, locals, op1, "t0")).unwrap();
+            writeln!(asm, "{}", load_operand(tcx, locals, op2, "t1")).unwrap();
+            use rustc_middle::mir::BinOp::*;
+            match operation {
+                Add | AddUnchecked => {
+                    // TODO handle floats
+                    // TODO handle overflow properly
+                    writeln!(asm, "\tadd\tt0, t0, t1").unwrap();
+                }
+                Sub | SubUnchecked => {
+                    // TODO handle floats
+                    // TODO handle overflow properly
+                    writeln!(asm, "\tsub\tt0, t0, t1").unwrap();
+                }
+                Mul | MulUnchecked => {
+                    // TODO handle floats
+                    // TODO handle overflow properly
+                    // TODO idk if this handles width properly
+                    writeln!(asm, "\tmulw\tt0, t0, t1").unwrap();
+                }
+                Rem => {
+                    writeln!(asm, "\trem\tt0, t0, t1").unwrap();
+                }
+                Shl | ShlUnchecked => {
+                    // TODO handle overflow properly
+                    writeln!(asm, "\tsll\tt0, t0, t1").unwrap();
+                }
+                Shr | ShrUnchecked => {
+                    // TODO handle overflow properly
+                    // TODO handle signed ints properly
+                    writeln!(asm, "\tsrl\tt0, t0, t1").unwrap();
+                }
+                BitAnd => {
+                    writeln!(asm, "\tand\tt0, t0, t1").unwrap();
+                }
+                BitOr => {
+                    writeln!(asm, "\tor\tt0, t0, t1").unwrap();
+                }
+                BitXor => {
+                    writeln!(asm, "\txor\tt0, t0, t1").unwrap();
+                }
+                Eq => {
+                    writeln!(asm, "\tsub\tt0, t0, t1").unwrap();
+                    writeln!(asm, "\tsnez\tt0, t0, t1").unwrap();
+                }
+                Ne => {
+                    writeln!(asm, "\tsub\tt0, t0, t1").unwrap();
+                    writeln!(asm, "\tseqz\tt0, t0, t1").unwrap();
+                }
+                Lt => {
+                    // TODO handle signed
+                    writeln!(asm, "\tsltu\tt0, t0, t1").unwrap();
+                }
+                Le => {
+                    // TODO handle signed
+                    writeln!(asm, "\tsub\tt2, t0, t1").unwrap();
+                    writeln!(asm, "\tsnez\tt2, t2, t1").unwrap();
+                    writeln!(asm, "\tsltu\tt0, t0, t1").unwrap();
+                    writeln!(asm, "\tor\tt0, t0, t2").unwrap();
+                }
+                Gt => {
+                    // TODO handle signed
+                    writeln!(asm, "\tsltu\tt0, t1, t0").unwrap();
+                }
+                Ge => {
+                    // TODO handle signed
+                    writeln!(asm, "\tsub\tt2, t0, t1").unwrap();
+                    writeln!(asm, "\tsnez\tt2, t2, t1").unwrap();
+                    writeln!(asm, "\tsltu\tt0, t1, t0").unwrap();
+                    writeln!(asm, "\tor\tt0, t0, t2").unwrap();
+                }
+                _ => writeln!(asm, "\t{COMMENT_CHAR} TODO Binary op ({op1:?}) {operation:?} ({op2:?})").unwrap()
+            }
+            writeln!(asm, "{}", reg_to_place(tcx, &locals, place, "t0")).unwrap();
+        }
 
         _ => {
             return format!(
@@ -586,7 +662,7 @@ fn place_to_reg_recursive<'tcx>(
             _ => "d", // TODO make this not bad
         };
         return format!(
-            "\tl{load_type} t0, {}(sp)\n{}",
+            "\tl{load_type}\tt0, {}(sp)\n{}",
             stack_offset_for(locals, place.local),
             place_to_reg_recursive(tcx, locals, place, dest, 1)
         );
