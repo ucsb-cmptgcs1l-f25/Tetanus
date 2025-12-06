@@ -460,6 +460,13 @@ fn get_assignment_asm<'tcx>(
                     // TODO handle overflow properly
                     writeln!(asm, "\tadd\tt0, t0, t1").unwrap();
                 }
+                AddWithOverflow => {
+                    // TODO handle floats
+                    // TODO handle signed addition
+                    writeln!(asm, "\tadd\tt0, t0, t1").unwrap();
+                    writeln!(asm, "\tsltu\tt1,t1,t0").unwrap();
+                    // TODO store overflow
+                }
                 Sub | SubUnchecked => {
                     // TODO handle floats
                     // TODO handle overflow properly
@@ -582,16 +589,8 @@ fn load_operand<'tcx>(
         Constant(box ConstOperand { const_: con, span, .. }) => {
             use rustc_middle::mir::ConstValue::*;
             use rustc_middle::mir::interpret::Scalar::*;
-            let norm_con_or = monomorphize(tcx, inst, *con); // tcx.try_normalize_erasing_regions(TypingEnv::fully_monomorphized(), *con);
-            // if let Err(msg) = norm_con_or {
-            //     // this happens on Box<any> and maybe others
-            //     // i dont understand those well enough to fix them rn
-            //     return format!(
-            //         "\t{COMMENT_CHAR} norm error: {:?} when evaluating {:?}\n\tmv\t{dest}, zero",
-            //         msg, op
-            //     );
-            // }
-            let evaluated_con_or = norm_con_or.eval(tcx, TypingEnv::fully_monomorphized(), *span);
+            let norm_con = monomorphize(tcx, inst, *con);
+            let evaluated_con_or = norm_con.eval(tcx, TypingEnv::fully_monomorphized(), *span);
             if let Err(msg) = evaluated_con_or {
                 // as far as i can tell these are related to alias type shenanigans
                 // i dont understand those well enough to fix them rn
