@@ -9,6 +9,7 @@ use rustc_codegen_ssa::{CodegenResults, CompiledModule, CrateInfo, ModuleKind};
 use rustc_data_structures::fx::FxIndexMap;
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_hir::Mutability;
+use rustc_middle::ty::print::with_no_trimmed_paths;
 use rustc_middle::dep_graph::{WorkProduct, WorkProductId};
 use rustc_middle::mir::mono::MonoItem;
 use rustc_middle::mir::{
@@ -150,6 +151,7 @@ fn start_module_codegen(
             (MonoItem::Fn(inst), _) => codegen_function(tcx, tcx.symbol_name(inst).name, inst),
             _ => {
                 eprintln!("mono item {}: {:?}", i, item);
+                // TODO finish
                 String::new()
             }
         }
@@ -277,10 +279,8 @@ fn codegen_function<'tcx>(
                 Coverage(_) => {}
                 Assign(box (place, rval)) => {
                     // This is erroring in some cases when formatting rvalues (adts i think)
-                    let diag = tcx.dcx().struct_span_err(statement.source_info.span, "backend error while formatting rvalue");
-                    writeln!(asm, "\t{COMMENT_CHAR} assign {rval:?} to {place:?}").unwrap();
-                    diag.emit();
-                    writeln!(asm, "{}", get_assignment_asm(tcx, &locals, place, rval)).unwrap();
+                    with_no_trimmed_paths!(writeln!(asm, "\t{COMMENT_CHAR} assign {rval :?}to {place:?}").unwrap());
+                    writeln!(asm, "{}", get_assignment_asm(tcx, inst, &locals, place, rval)).unwrap();
                 }
 
                 _ => asm += format!("\t{COMMENT_CHAR} TODO: {:?}\n", statement.kind).as_str(),
@@ -318,7 +318,7 @@ fn codegen_function<'tcx>(
                 )
                 .as_str();
             }
-            _ => asm += format!("\t{COMMENT_CHAR} TODO: {:?}\n\n", bb.terminator().kind).as_str(),
+            _ => asm += with_no_trimmed_paths!(format!("\t{COMMENT_CHAR} TODO: {:?}\n\n", bb.terminator().kind)).as_str(),
         }
     }
 
@@ -406,6 +406,7 @@ fn adt_size<'tcx>(
 
 fn get_assignment_asm<'tcx>(
     tcx: TyCtxt<'tcx>,
+    inst: Instance<'tcx>,
     locals: &Vec<Local<'tcx>>,
     place: &Place<'tcx>,
     rvalue: &Rvalue<'tcx>,
@@ -416,31 +417,31 @@ fn get_assignment_asm<'tcx>(
     use rustc_middle::mir::Rvalue::*;
     match rvalue {
         Use(operand) => {
-            writeln!(
+            with_no_trimmed_paths!(writeln!(
                 asm,
                 "\t{COMMENT_CHAR} Place {place:?}{:?} = Use({operand:?})",
                 place.projection
-            )
+            ))
             .unwrap();
-            writeln!(asm, "{}", load_operand(tcx, locals, operand, "t0")).unwrap();
+            writeln!(asm, "{}", load_operand(tcx, inst, locals, operand, "t0")).unwrap();
             writeln!(asm, "{}", reg_to_place(tcx, locals, place, "t0")).unwrap();
         }
         UnaryOp(operation, operand) => {
             use rustc_middle::mir::UnOp::*;
-            writeln!(
+            with_no_trimmed_paths!(writeln!(
                 asm,
                 "\t{COMMENT_CHAR} Place {place:?}{:?} = {operation:?}({operand:?})",
                 place.projection
-            )
+            ))
             .unwrap();
             match operation {
                 Not => {
-                    writeln!(asm, "{}", load_operand(tcx, &locals, operand, "t0")).unwrap();
+                    writeln!(asm, "{}", load_operand(tcx, inst, &locals, operand, "t0")).unwrap();
                     writeln!(asm, "\tnot\tt0, t0").unwrap();
                     writeln!(asm, "{}", reg_to_place(tcx, &locals, place, "t0")).unwrap();
                 }
                 Neg => {
-                    writeln!(asm, "{}", load_operand(tcx, &locals, operand, "t0")).unwrap();
+                    writeln!(asm, "{}", load_operand(tcx, inst, &locals, operand, "t0")).unwrap();
                     writeln!(asm, "\tneg\tt0, t0").unwrap();
                     writeln!(asm, "{}", reg_to_place(tcx, &locals, place, "t0")).unwrap();
                 }
@@ -450,8 +451,8 @@ fn get_assignment_asm<'tcx>(
             }
         }
         BinaryOp(operation, box (op1, op2)) => {
-            writeln!(asm, "{}", load_operand(tcx, locals, op1, "t0")).unwrap();
-            writeln!(asm, "{}", load_operand(tcx, locals, op2, "t1")).unwrap();
+            writeln!(asm, "{}", load_operand(tcx, inst, locals, op1, "t0")).unwrap();
+            writeln!(asm, "{}", load_operand(tcx, inst, locals, op2, "t1")).unwrap();
             use rustc_middle::mir::BinOp::*;
             match operation {
                 Add | AddUnchecked => {
@@ -527,16 +528,16 @@ fn get_assignment_asm<'tcx>(
         }
 
         _ => {
-            return format!(
+            return with_no_trimmed_paths!(format!(
                 "\t{COMMENT_CHAR} unknown rvalue {rvalue:?} when trying to assign to {place:?}"
-            );
+            ));
         }
     }
     // TODO handle non local Places
     if place.projection.len() > 0 {
-        return format!(
+        return with_no_trimmed_paths!(format!(
             "\t{COMMENT_CHAR} place has projections {place:?} when trying to assign {rvalue:?} to it"
-        );
+        ));
     }
 
     return asm;
@@ -570,6 +571,7 @@ fn get_assignment_asm<'tcx>(
 
 fn load_operand<'tcx>(
     tcx: TyCtxt<'tcx>,
+    inst: Instance<'tcx>,
     locals: &Vec<Local<'tcx>>,
     op: &Operand<'tcx>,
     dest: &str,
@@ -580,21 +582,21 @@ fn load_operand<'tcx>(
         Constant(box ConstOperand { const_: con, span, .. }) => {
             use rustc_middle::mir::ConstValue::*;
             use rustc_middle::mir::interpret::Scalar::*;
-            let norm_con_or = tcx.try_normalize_erasing_regions(TypingEnv::fully_monomorphized(), *con);
-            if let Err(msg) = norm_con_or {
-                // this happens on Box<any> and maybe others
-                // i dont understand those well enough to fix them rn
-                return format!(
-                    "\t{COMMENT_CHAR} error: {:?} when evaluating {:?}\n\tmv\t{dest}, zero",
-                    msg, op
-                );
-            }
-            let evaluated_con_or = norm_con_or.unwrap().eval(tcx, TypingEnv::fully_monomorphized(), *span);
+            let norm_con_or = monomorphize(tcx, inst, *con); // tcx.try_normalize_erasing_regions(TypingEnv::fully_monomorphized(), *con);
+            // if let Err(msg) = norm_con_or {
+            //     // this happens on Box<any> and maybe others
+            //     // i dont understand those well enough to fix them rn
+            //     return format!(
+            //         "\t{COMMENT_CHAR} norm error: {:?} when evaluating {:?}\n\tmv\t{dest}, zero",
+            //         msg, op
+            //     );
+            // }
+            let evaluated_con_or = norm_con_or.eval(tcx, TypingEnv::fully_monomorphized(), *span);
             if let Err(msg) = evaluated_con_or {
                 // as far as i can tell these are related to alias type shenanigans
                 // i dont understand those well enough to fix them rn
                 return format!(
-                    "\t{COMMENT_CHAR} error: {:?} when evaluating {:?}\n\tmv\t{dest}, zero",
+                    "\t{COMMENT_CHAR} eval error: {:?} when evaluating {:?}\n\tmv\t{dest}, zero",
                     msg, op
                 );
             }
