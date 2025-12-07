@@ -478,6 +478,13 @@ fn get_assignment_asm<'tcx>(
                     // TODO idk if this handles width properly
                     writeln!(asm, "\tmulw\tt0, t0, t1").unwrap();
                 }
+                MulWithOverflow => {
+                    // TODO handle floats
+                    // TODO handle signed addition
+                    writeln!(asm, "\tmul\tt0, t0, t1").unwrap();
+                    writeln!(asm, "\t{COMMENT_CHAR} TODO handle overflow").unwrap();
+                    // TODO handle overflow
+                }
                 Rem => {
                     writeln!(asm, "\trem\tt0, t0, t1").unwrap();
                 }
