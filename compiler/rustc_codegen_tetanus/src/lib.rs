@@ -16,39 +16,39 @@
 extern crate rustc_driver;
 // #[macro_use]
 // extern crate tracing;
+extern crate rustc_ast;
 extern crate rustc_codegen_ssa;
 extern crate rustc_data_structures;
 extern crate rustc_errors;
+extern crate rustc_fluent_macro;
 extern crate rustc_hir;
-extern crate rustc_ast;
 extern crate rustc_middle;
 extern crate rustc_session;
 extern crate rustc_span;
-extern crate rustc_fluent_macro;
 
 use std::any::Any;
+use std::fmt::Write;
 use std::path::PathBuf;
 use std::string::String;
-use std::fmt::Write;
 use std::sync::Arc;
 
+use rustc_ast::expand::allocator::AllocatorKind;
+use rustc_ast::expand::autodiff_attrs::AutoDiffItem;
+use rustc_codegen_ssa::back::lto::{SerializedModule, ThinModule};
+use rustc_codegen_ssa::back::write::{
+    CodegenContext, FatLtoInput, ModuleConfig, TargetMachineFactoryFn,
+};
+use rustc_codegen_ssa::traits::*;
+use rustc_codegen_ssa::{CodegenResults, CompiledModule, ModuleCodegen, TargetConfig};
+use rustc_data_structures::fx::FxIndexMap;
+use rustc_errors::{DiagCtxtHandle, FatalError};
 #[allow(unused_imports)]
 use rustc_hir::def_id::LOCAL_CRATE;
-use rustc_codegen_ssa::traits::*;
-use rustc_codegen_ssa::ModuleCodegen;
-use rustc_middle::ty::TyCtxt;
-use rustc_ast::expand::allocator::AllocatorKind;
-use rustc_session::Session;
 use rustc_middle::dep_graph::{WorkProduct, WorkProductId};
-use rustc_session::config::{OutputFilenames, PrintRequest, OptLevel};
-use rustc_codegen_ssa::back::write::{TargetMachineFactoryFn, CodegenContext, ModuleConfig, FatLtoInput};
-use rustc_codegen_ssa::back::lto::{SerializedModule, ThinModule};
-use rustc_codegen_ssa::{CodegenResults, TargetConfig};
-use rustc_errors::{DiagCtxtHandle, FatalError};
-use rustc_ast::expand::autodiff_attrs::AutoDiffItem;
-use rustc_data_structures::fx::FxIndexMap;
+use rustc_middle::ty::TyCtxt;
+use rustc_session::Session;
+use rustc_session::config::{OptLevel, OutputFilenames, PrintRequest};
 use rustc_span::Symbol;
-use rustc_codegen_ssa::CompiledModule;
 
 mod back;
 mod codegen;
@@ -101,16 +101,8 @@ impl CodegenBackend for TetanusCodegenBackend {
         (codegen_results, work_products)
     }
 
-    
     fn codegen_crate<'tcx>(&self, tcx: TyCtxt<'tcx>) -> Box<dyn Any> {
-        codegen::aot::run_aot(
-            tcx,
-        )
-        // Box::new(rustc_codegen_ssa::base::codegen_crate(
-        //     TetanusCodegenBackend(()),
-        //     tcx,
-        //     CPU_NAME,
-        // ))
+        codegen::aot::run_aot(tcx)
     }
 }
 
@@ -122,7 +114,7 @@ impl ExtraBackendMethods for TetanusCodegenBackend {
         _kind: AllocatorKind,
         _alloc_error_handler_kind: AllocatorKind,
     ) -> Self::Module {
-        Self::Module{}
+        Self::Module {}
     }
 
     /// This generates the codegen unit and returns it along with
@@ -132,10 +124,7 @@ impl ExtraBackendMethods for TetanusCodegenBackend {
         _tcx: TyCtxt<'_>,
         cgu_name: Symbol,
     ) -> (ModuleCodegen<Self::Module>, u64) {
-        (
-            ModuleCodegen::<Self::Module>::new_regular(cgu_name.to_string(), Self::Module{}),
-            64
-        )
+        (ModuleCodegen::<Self::Module>::new_regular(cgu_name.to_string(), Self::Module {}), 64)
     }
 
     fn target_machine_factory(
@@ -159,7 +148,7 @@ impl WriteBackendMethods for TetanusCodegenBackend {
     type TargetMachineError = ();
     type ThinData = back::lto::ThinData;
     type ThinBuffer = back::lto::ThinBuffer;
-    
+
     /// Performs fat LTO by merging all modules into a single one, running autodiff
     /// if necessary and running any further optimizations
     fn run_and_optimize_fat_lto(
@@ -211,7 +200,10 @@ impl WriteBackendMethods for TetanusCodegenBackend {
     ) -> Result<CompiledModule, FatalError> {
         Ok(back::write::codegen(cgcx, module, config))
     }
-    fn prepare_thin(_module: ModuleCodegen<Self::Module>, _want_summary: bool) -> (String, Self::ThinBuffer) {
+    fn prepare_thin(
+        _module: ModuleCodegen<Self::Module>,
+        _want_summary: bool,
+    ) -> (String, Self::ThinBuffer) {
         panic!("not implemented yet!");
     }
     fn serialize_module(_module: ModuleCodegen<Self::Module>) -> (String, Self::ModuleBuffer) {
